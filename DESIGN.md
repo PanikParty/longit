@@ -90,6 +90,18 @@ n_ctx = 8192
 n_gpu_layers = -1
 ```
 
+### Filesystem tools (`ls`, `pwd`, `cd`)
+Native Python in `fs.py`, no subprocess or shell. `ls` and `cd` are confined to the project root
+(symlinks are resolved first, so a link out of the project is refused). `cd` sets the agent's `cwd`,
+which `git`, `gh` and `ls` then use; moving inside the project is automatic, while a `cd` that leaves it
+asks for approval, re-roots the session on the new directory, and clears the session's "always" approvals.
+
+### .gitignore guard
+When the model stages everything (`git add -A/--all/.`) in a repo with no `.gitignore`, `long` scans the
+untracked files (`gitignore.py`). If it finds generated or secret files (`.venv/`, `__pycache__/`, `node_modules/`,
+`.env`, `.DS_Store`, ...), it asks before the add runs whether to create a `.gitignore` with those patterns.
+Declining proceeds with the add and is not asked again for that repo this session.
+
 ### GitHub repo creation (`gh` tool)
 A second tool, `gh`, exists solely so "create a GitHub repo and push everything" works. Its allow-list is
 `auth status`, `repo view` (READ) and `repo create` (everything else is BLOCKED). `repo create` needs

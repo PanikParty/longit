@@ -121,18 +121,43 @@ def _argv_from_payload(obj: dict) -> list[str] | None:
     return payload
 
 
-def parse_json_text_tool_call(text: str) -> tuple[str, list[str]] | None:
-    """Some small models emit the tool call as JSON *text* instead of a structured call, e.g.
-    {"name": "Run", "arguments": ["init"]}, sometimes after a sentence of prose.
-    Returns (tool, argv) with tool in {"git", "gh"}, or None.
-    A reply that is exactly one JSON object may use any shape; a JSON object embedded in prose must
-    look like a call ("name" plus "arguments"), and there must be exactly one of them."""
+def _call_from_obj(obj: dict) -> tuple[str, list[str] | dict] | None:
+    name = str(obj.get("name", "")).lower()
+    if name in ("ls", "pwd", "cd"):
+        args = obj.get("arguments", obj.get("parameters", {}))
+        if isinstance(args, str):
+            try:
+                args = json.loads(args) if args.strip() else {}
+            except json.JSONDecodeError:
+                return None
+        return (name, args) if isinstance(args, dict) else None
+    argv = _argv_from_payload(obj)
+    if not argv:
+        return None
+    tool = "git"
+    if argv[0] in ("git", "gh"):
+        tool, argv = argv[0], argv[1:]
+    elif name == "gh":
+        tool = "gh"
+    return (tool, argv) if argv else None
+
+
+MAX_TEXT_CALLS = 5
+
+
+def parse_json_text_tool_calls(text: str) -> list[tuple[str, list[str] | dict]]:
+    """Some small models emit tool calls as JSON *text* instead of structured calls, e.g.
+    {"name": "Run", "arguments": ["init"]}, sometimes after prose or several in a row.
+    Returns [(tool, argv)] for git/gh or [(tool, args_dict)] for ls/pwd/cd, in order; [] if none.
+    A reply that is exactly one JSON object may use any shape; JSON embedded in prose (or several
+    objects) must each look like a call ("name" plus "arguments"). If any candidate is malformed the
+    whole reply is treated as plain text."""
     t = text.strip()
     m = _JSON_FENCE.match(t)
     if m:
         t = m.group(1).strip()
     decoder = json.JSONDecoder()
-    found: list[tuple[dict, bool]] = []
+    found: list[dict] = []
     pos = 0
     while (i := t.find("{", pos)) != -1:
         try:
@@ -140,23 +165,19 @@ def parse_json_text_tool_call(text: str) -> tuple[str, list[str]] | None:
         except json.JSONDecodeError:
             pos = i + 1
             continue
-        if isinstance(obj, dict):
-            whole = i == 0 and end == len(t)
-            if whole or ("name" in obj and "arguments" in obj):
-                found.append((obj, whole))
+        if isinstance(obj, dict) and ((i == 0 and end == len(t)) or ("name" in obj and "arguments" in obj)):
+            found.append(obj)
         pos = end
-    if len(found) != 1:
-        return None
-    obj, _ = found[0]
-    argv = _argv_from_payload(obj)
-    if not argv:
-        return None
-    tool = "git"
-    if argv[0] in ("git", "gh"):
-        tool, argv = argv[0], argv[1:]
-    elif str(obj.get("name", "")).lower() == "gh":
-        tool = "gh"
-    return (tool, argv) if argv else None
+    if not found or len(found) > MAX_TEXT_CALLS:
+        return []
+    calls = [_call_from_obj(o) for o in found]
+    return [] if any(c is None for c in calls) else calls  # type: ignore[misc]
+
+
+def parse_json_text_tool_call(text: str) -> tuple[str, list[str] | dict] | None:
+    """Single-call convenience wrapper: None unless the reply holds exactly one call."""
+    calls = parse_json_text_tool_calls(text)
+    return calls[0] if len(calls) == 1 else None
 
 
 def parse_json_text_call(text: str) -> list[str] | None:
@@ -230,9 +251,10 @@ def run_gh(argv: list[str], cwd: Path, timeout: float = 120.0) -> RunResult:
         GH_PROMPT_DISABLED="1", GH_PAGER="cat", PAGER="cat", NO_COLOR="1", GIT_TERMINAL_PROMPT="0"))
 
 
-def check_gh_confined(argv: list[str], root: Path) -> str | None:
+def check_gh_confined(argv: list[str], root: Path, cwd: Path | None = None) -> str | None:
     """`--source` must stay inside the repo."""
     root = root.resolve()
+    cwd = (cwd or root).resolve()
     for i, a in enumerate(argv):
         val = None
         if a.startswith("--source="):
@@ -240,7 +262,7 @@ def check_gh_confined(argv: list[str], root: Path) -> str | None:
         elif a == "--source" and i + 1 < len(argv):
             val = argv[i + 1]
         if val is not None:
-            p = (root / val).resolve()
+            p = (cwd / val).resolve()
             if not (p == root or root in p.parents):
                 return f"--source {val} points outside the repository ({root})"
     return None

@@ -98,7 +98,7 @@ class ConsoleUI:
         if cmd == "/help":
             self.console.print(Text(HELP))
         elif cmd == "/status":
-            self.tool_result(tools.run_git(["status", "--short", "--branch"], agent.root))
+            self.tool_result(tools.run_git(["status", "--short", "--branch"], agent.cwd))
         elif cmd in ("/model", "/models"):
             self._pick_model(agent, line.split(maxsplit=1)[1].strip() if " " in line else "")
         elif cmd == "/backend":

@@ -293,5 +293,75 @@ def test_embedded_json_needs_call_shape_and_uniqueness():
     p = tools.parse_json_text_tool_call
     assert p('see {"args": ["status"]} for an example') is None
     two = '{"name":"git","arguments":["log"]} then {"name":"git","arguments":["status"]}'
-    assert p(two) is None
+    assert p(two) is None                                   # single-call wrapper
+    assert [c[1] for c in tools.parse_json_text_tool_calls(two)] == [["log"], ["status"]]
+    assert tools.parse_json_text_tool_calls(two + ' and {"args": ["x"]}') != []  # extra loose object is ignored
+    assert tools.parse_json_text_tool_calls('{"name":"git","arguments":["log"]} {"name":"git","arguments":[]}') == []
     assert p('ok: {"name": "gh", "arguments": ["auth", "status"]}') == ("gh", ["auth", "status"])
+
+
+def test_snapshot_includes_remotes(repo):
+    from long.agent import snapshot
+    git(repo, "remote", "add", "origin", "git@github.com:me/longit.git")
+    assert "origin\tgit@github.com:me/longit.git" in snapshot(repo)
+
+
+def _junk_repo(tmp_path):
+    git(tmp_path, "init", "-q", "-b", "main")
+    (tmp_path / "app.py").write_text("x")
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "app.cpython-312.pyc").write_text("x")
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / ".venv" / "pyvenv.cfg").write_text("x")
+    (tmp_path / ".env").write_text("SECRET=1")
+
+
+def test_add_all_offers_gitignore_and_writes_it(tmp_path):
+    _junk_repo(tmp_path)
+    ui = FakeUI(answers=[Approval.YES, Approval.YES])  # create .gitignore, then the add itself
+    be = FakeBackend([AssistantTurn(tool_calls=[call("add", "-A")]), AssistantTurn(text="staged")])
+    Agent(be, tmp_path.resolve(), ui).run_turn("stage everything")
+    assert sorted((tmp_path / ".gitignore").read_text().split()) == [".env", ".venv/", "__pycache__/"]
+    staged = git(tmp_path, "diff", "--cached", "--name-only").split()
+    assert sorted(staged) == [".gitignore", "app.py"]
+
+
+def test_gitignore_declined_still_stages_and_is_not_asked_twice(tmp_path):
+    _junk_repo(tmp_path)
+    ui = FakeUI(answers=[Approval.NO, Approval.YES, Approval.YES])
+    be = FakeBackend([AssistantTurn(tool_calls=[call("add", "-A")]),
+                      AssistantTurn(tool_calls=[call("add", "--all", id="c2")]), AssistantTurn(text="ok")])
+    Agent(be, tmp_path.resolve(), ui).run_turn("stage everything")
+    assert not (tmp_path / ".gitignore").exists()
+    confirms = [x for x in ui.log if x[0] == "confirm"]
+    assert len(confirms) == 3 and "create" in confirms[0][1]
+
+
+def test_no_prompt_when_gitignore_exists_or_nothing_to_ignore(repo, tmp_path):
+    ui = FakeUI(answers=[Approval.YES])
+    be = FakeBackend([AssistantTurn(tool_calls=[call("add", "-A")]), AssistantTurn(text="ok")])
+    Agent(be, repo, ui).run_turn("stage")           # `repo` has no junk
+    assert [x for x in ui.log if x[0] == "confirm"] == [("confirm", "git add -A", "MUTATE")]
+    (repo / ".gitignore").write_text("x\n")
+    (repo / ".env").write_text("S=1")
+    ui2 = FakeUI(answers=[Approval.YES])
+    be2 = FakeBackend([AssistantTurn(tool_calls=[call("add", "-A")]), AssistantTurn(text="ok")])
+    Agent(be2, repo, ui2).run_turn("stage")         # .gitignore present -> no offer
+    assert len([x for x in ui2.log if x[0] == "confirm"]) == 1
+
+
+def test_stages_everything_detection():
+    from long.gitignore import stages_everything as f
+    assert f(["add", "-A"]) and f(["add", "--all"]) and f(["add", "."]) and f(["add", "-Av"])
+    assert not f(["add", "a.txt"]) and not f(["commit", "-a"]) and not f(["status"])
+
+
+def test_two_json_text_calls_in_one_reply_run_in_order(repo):
+    (repo / "b.txt").write_text("b")
+    text = ('{"name": "git", "arguments": {"args":["add","b.txt"]}}\n\n'
+            '{"name": "git", "arguments": {"args":["commit","-m","Add b"]}}')
+    ui = FakeUI(answers=[Approval.YES, Approval.YES])
+    be = FakeBackend([AssistantTurn(text=text), AssistantTurn(text="")])
+    Agent(be, repo, ui).run_turn("commit")
+    assert [x[1] for x in ui.log if x[0] == "confirm"] == ["git add b.txt", "git commit -m 'Add b'"]
+    assert git(repo, "log", "--oneline").count("\n") == 2
