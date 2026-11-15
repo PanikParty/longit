@@ -147,6 +147,7 @@ Built in:
 | Skill | What it does |
 |---|---|
 | `pr-branch` | scripted workflow: put every change on a new `pr/...` branch, commit, push to `origin` and open the pull request, asking you only for approvals. Try "prepare a pull request" |
+| `rebase-pr` | scripted workflow: bring a PR branch up to date by rebasing it onto its base branch and pushing it (only if it's behind). Try "rebase my PR" or "update my branch" |
 | `github-repo` | publish the current project to a new private GitHub repo and push |
 | `undo-last-commit` | undo the latest commit but keep its changes (offers `revert` if it was already pushed) |
 | `whats-new` | summarize recent changes (since a tag, a date, or the last commits) |
@@ -173,6 +174,10 @@ triggers: [tidy branches, clean up branches, "re:\bprune (old )?branches\b"]
 | `action` | `true` if the skill must end by changing something: replies that only talk are nudged to keep going |
 | `workflow` | name of a scripted workflow (below) |
 
+- **Rebasing a PR.** `rebase-pr` rebases only when the base branch has commits the branch lacks, never on `main` or
+  with uncommitted changes, and it aborts a conflicted rebase instead of leaving it half-done (it reports the
+  conflicting files; it doesn't guess at resolutions). Because a rebase rewrites the branch, the push is
+  `--force-with-lease`, which is DESTRUCTIVE: it asks every time, even in `auto` mode.
 - **Scripted skills.** `workflow: NAME` makes the harness run a fixed command sequence itself and use the model only
   to write text (a branch name, a commit message, a PR description). This is how `pr-branch` works, so it doesn't
   depend on a small model staying on task. Every command still goes through classification, the mode and the

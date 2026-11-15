@@ -154,4 +154,96 @@ def pr_branch(a: "Agent") -> str:
             f"Branch `{name}`, one commit (\"{subject}\"), pushed to origin.{left_out}")
 
 
-REGISTRY: dict[str, Callable[["Agent"], str]] = {"pr-branch": pr_branch}
+# ---- the rebase-pr workflow --------------------------------------------------------------------------
+_PROTECTED_BRANCHES = {"main", "master", "develop", "trunk"}
+
+
+def rebase_pr(a: "Agent") -> str:
+    """Bring the checked-out PR branch up to date with its base branch by rebasing, then push it.
+
+    When: only if the base has commits the branch lacks (behind > 0); otherwise there is nothing to do.
+    Never on a protected branch, never over uncommitted work, and a conflicted rebase is aborted rather than
+    left half-done. The push is `--force-with-lease` (DESTRUCTIVE, so it always asks) because a rebase rewrites
+    the branch's commits; a branch that was never pushed gets a plain `push -u`."""
+    label, n, done = "workflow rebase-pr", 0, []
+
+    def step(argv: list[str], tool: str = "git") -> StepResult:
+        nonlocal n
+        n += 1
+        return a.run_tool(tool, argv, f"{label} - step {n}")
+
+    def q(*argv: str) -> "tools.RunResult":  # quiet harness-internal read
+        return tools.run_git(list(argv), a.cwd, timeout=30, max_chars=None)
+
+    def count(rng: str) -> int:
+        out = q("rev-list", "--count", rng).output.strip()
+        return int(out) if out.isdigit() else 0
+
+    if not step(["status", "--short", "--branch"]).ok:
+        return "This isn't a git repository, so there is nothing to rebase."
+    branch = q("branch", "--show-current").output.strip()
+    if not branch:
+        return "HEAD is detached, so there is no branch to rebase. Switch to your PR branch first."
+    if branch in _PROTECTED_BRANCHES:
+        return (f"You're on `{branch}`. A rebase updates a feature or PR branch, never `{branch}` itself; "
+                "switch to the PR branch first.")
+    if q("status", "--porcelain", "--untracked-files=no").output.strip():
+        return "There are uncommitted changes. Commit or stash them first so the rebase can't disturb them."
+    if not step(["remote", "get-url", "origin"]).ok:
+        return "There is no `origin` remote, so there is nothing to rebase onto or push to."
+
+    base = None
+    r = step(["pr", "view", "--json", "baseRefName", "--jq", ".baseRefName"], tool="gh")   # the PR's own base, if any
+    if r.ok and r.output.strip():
+        base = r.output.strip().splitlines()[-1].strip()
+    if not base:
+        head = q("symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD").output.strip()
+        base = head.removeprefix("origin/") if head else None
+    if not base:
+        base = next((c for c in ("main", "master") if q("rev-parse", "--verify", "-q", f"origin/{c}").exit_code == 0), None)
+    if not base:
+        return "I couldn't work out the base branch (no pull request for this branch and no origin/main or origin/master)."
+    target = f"origin/{base}"
+
+    plan = a.mode.value == "plan"
+    if not plan:
+        r = step(["fetch", "origin"])
+        if not r.ok:
+            return _stopped(r, "git fetch origin", done)
+    if q("rev-parse", "--verify", "-q", target).exit_code != 0:
+        return f"`{target}` doesn't exist, so there is nothing to rebase onto."
+    behind, ahead = count(f"HEAD..{target}"), count(f"{target}..HEAD")
+    if behind == 0:
+        return (f"`{branch}` is already up to date with `{target}` ({ahead} commit(s) ahead of it), "
+                "so no rebase is needed." + (" (As of the last fetch; plan mode doesn't fetch.)" if plan else ""))
+
+    pushed = q("rev-parse", "--verify", "-q", f"origin/{branch}").exit_code == 0
+    push = (["push", "--force-with-lease", "origin", branch] if pushed else ["push", "-u", "origin", branch])
+    if plan:
+        return ("Plan (nothing was changed; counts are from the last fetch):\n"
+                f"1. git fetch origin\n2. git rebase {target}  (`{branch}` is {behind} commit(s) behind it, {ahead} ahead)\n"
+                "3. if the rebase conflicts: git rebase --abort, and tell you which files conflict\n"
+                f"4. {safety.display(push)}" + ("  (a force-push: it will ask you)" if pushed else ""))
+
+    r = step(["rebase", target])
+    if not r.ok:
+        conflicts = [p for p in q("diff", "--name-only", "--diff-filter=U").output.splitlines() if p]
+        aborted = step(["rebase", "--abort"]).ok
+        return (f"Rebasing `{branch}` onto `{target}` hit conflicts in {', '.join(conflicts) or 'some files'}. "
+                + ("I aborted the rebase, so the branch is exactly as it was. " if aborted else
+                   "I could not abort it automatically: run `git rebase --abort`. ")
+                + f"To resolve them yourself: `git rebase {target}`, fix the files, `git add` them, "
+                  "`git rebase --continue`, then ask me to push.")
+    done.append(f"rebased {ahead} commit(s) onto {target} ({behind} new upstream commit(s))")
+
+    r = step(push)
+    if not r.ok:
+        return _stopped(r, safety.display(push), done) + " The rebased branch is local only; the pull request on GitHub is unchanged."
+    r = step(["pr", "view", "--json", "url", "--jq", ".url"], tool="gh")
+    url = next((m.group(0) for m in re.finditer(r"https://\S+", r.output)), "") if r.ok else ""
+    return (f"Rebased `{branch}` onto `{target}` ({ahead} commit(s) replayed over {behind} new upstream commit(s)) and "
+            + ("force-pushed with --force-with-lease." if pushed else "pushed it.")
+            + (f"\nPull request: {url}" if url else ""))
+
+
+REGISTRY: dict[str, Callable[["Agent"], str]] = {"pr-branch": pr_branch, "rebase-pr": rebase_pr}
