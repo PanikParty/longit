@@ -161,6 +161,16 @@ commits the base lacks, open PR or none) and the merged ones. Older `gh` release
 `commits[-1].oid`, which GitHub only allows for about 25 PRs per query; a full page adds a note that older PRs weren't checked. If `gh` fails
 the answer falls back to ancestry alone and says so.
 
+### The deletable-branches workflow
+`deletable-branches` answers "which branches can I delete?" and shares `scan_branches` (fetch, base, per-branch merged/ahead/open-PR
+classification) with `merged-branches`. The unscoped model answer to that question was dangerous: it listed `main`, the checked-out
+branch, and a branch with an open PR. The workflow instead lists a branch as safe only if it is merged (ancestor of the base, or the
+exact head of a MERGED PR), is not the base or a conventional long-lived branch (`main`, `master`, `develop`, `trunk`, `dev`,
+`staging`, `production`, `prod`, `release/*`), is not checked out here or in any worktree (`git worktree list --porcelain`), and has
+no open PR. Everything else is listed under "Keep" with the reason (unmerged commits, open PR, a merged PR with newer commits) or "Can't
+delete". It never deletes: it prints `git branch -d` for history-merged locals, `git branch -D` for squash/rebase-merged ones (which `-d`
+would refuse), and `git push origin --delete` for those on origin, which the user can run (they are MUTATE/DESTRUCTIVE and ask).
+
 ### Trajectory trace
 With tracing on (`--trace`, `/trace`, `trace = true`) the agent emits one labelled event per step through an optional
 `trace_event(kind, title, body, status)` frontend hook: `model` (latency), `thinking`, `tool_call`, `tool_result`,

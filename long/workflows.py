@@ -370,12 +370,34 @@ def _default_base(q: Callable[..., "tools.RunResult"], has_origin: bool) -> tupl
     return None, None
 
 
-def merged_branches(a: "Agent") -> str:
-    """Answer "have all the branches been merged?" for every local and origin branch, read-only apart from an
-    optional `git fetch --prune origin` (asks like any change). A branch counts as merged if its tip is in the base
-    branch's history, or if GitHub shows a merged PR from that branch whose head is exactly that tip (which catches
-    squash and rebase merges, where the commits themselves never reach the base)."""
-    label, n = "workflow merged-branches", 0
+@dataclass
+class BranchInfo:
+    name: str
+    where: str            # "local + origin" | "local only" | "origin only"
+    merged: bool          # every ref of this name is in the base's history or is the exact head of a merged PR
+    via_pr: str = ""      # "PR #N" when merged only through its pull request (squash/rebase merge)
+    ahead: int = 0        # commits the base lacks (unmerged branches)
+    open_pr: str = ""     # number of an open PR from this branch
+    tail_pr: str = ""     # "PR #N was merged but this branch has newer commits"
+    local_by_ancestry: bool = True   # local tip is in the base's history, so `git branch -d` accepts it
+    has_local: bool = False
+    has_origin: bool = False
+
+
+@dataclass
+class BranchScan:
+    base: str
+    base_ref: str
+    current: str
+    branches: list[BranchInfo]
+    worktree_branches: set[str]
+    notes: list[str]
+
+
+def scan_branches(a: "Agent", label: str) -> "BranchScan | str":
+    """Fetch (unless plan mode), then classify every local and origin branch against the base branch.
+    Returns a BranchScan, or a ready-made explanation string when it can't proceed."""
+    n = 0
     notes: list[str] = []
 
     def step(argv: list[str], tool: str = "git") -> StepResult:
@@ -395,9 +417,9 @@ def merged_branches(a: "Agent") -> str:
         else:
             r = step(["fetch", "--prune", "origin"])
             if not r.ok:
-                notes.append("you declined the fetch" if r.content.startswith("denied") else
-                             f"the fetch failed ({_first_line(r.output) or r.status})")
-                notes[-1] += ", so remote information may be out of date"
+                notes.append(("you declined the fetch" if r.content.startswith("denied") else
+                              f"the fetch failed ({_first_line(r.output) or r.status})")
+                             + ", so remote information may be out of date")
     base, base_ref = _default_base(q, has_origin)
     if base is None or base_ref is None:
         return "I couldn't work out which branch to compare against (no main or master, local or on origin)."
@@ -411,6 +433,8 @@ def merged_branches(a: "Agent") -> str:
             refs.setdefault(ref.removeprefix("refs/remotes/origin/"), {})["origin"] = sha
     refs.pop(base, None)
     current = q("branch", "--show-current").output.strip()
+    worktree_branches = {ln.split("refs/heads/", 1)[1].strip() for ln in q("worktree", "list", "--porcelain").output.splitlines()
+                         if ln.startswith("branch refs/heads/")}
 
     prs: list[tuple[str, str, str, str]] = []   # (number, state, head branch, head commit)
     gh: StepResult | None = None
@@ -438,52 +462,123 @@ def merged_branches(a: "Agent") -> str:
         if limited_to and len(prs) >= limited_to:
             notes.append(f"this gh version is old, so only the {limited_to} most recent pull requests were checked")
 
-    merged: list[str] = []
-    unmerged: list[tuple[str, str]] = []
+    infos: list[BranchInfo] = []
     for name in sorted(refs):
         where = refs[name]
-        via_pr, ahead_max, tail_pr = "", 0, ""
-        all_merged = True
-        for sha in where.values():
-            if q("merge-base", "--is-ancestor", sha, base_ref).exit_code == 0:
+        info = BranchInfo(name, "local + origin" if len(where) == 2 else ("local only" if "local" in where else "origin only"),
+                          merged=True, has_local="local" in where, has_origin="origin" in where)
+        for kind, sha in where.items():
+            by_ancestry = q("merge-base", "--is-ancestor", sha, base_ref).exit_code == 0
+            if kind == "local":
+                info.local_by_ancestry = by_ancestry
+            if by_ancestry:
                 continue
             hit = next((p for p in prs if p[2] == name and p[1] == "MERGED" and p[3] == sha), None)
             if hit:
-                via_pr = via_pr or f"PR #{hit[0]}"
+                info.via_pr = info.via_pr or f"PR #{hit[0]}"
                 continue
-            all_merged = False
+            info.merged = False
             cnt = q("rev-list", "--count", f"{base_ref}..{sha}").output.strip()
-            ahead_max = max(ahead_max, int(cnt) if cnt.isdigit() else 0)
-            tail_pr = tail_pr or next((f"PR #{p[0]} was merged but this branch has newer commits"
-                                       for p in prs if p[2] == name and p[1] == "MERGED"), "")
-        if all_merged:
-            merged.append(name + (f" ({via_pr})" if via_pr else "") + (" (current)" if name == current else ""))
-            continue
-        open_pr = next((p[0] for p in prs if p[2] == name and p[1] == "OPEN"), None)
-        place = "local + origin" if len(where) == 2 else ("local only" if "local" in where else "origin only")
-        detail = [place, f"{ahead_max} commit(s) not in {base_ref}",
-                  f"open PR #{open_pr}" if open_pr else (tail_pr or "no PR")]
-        unmerged.append((name + (" (current)" if name == current else ""), ", ".join(detail)))
+            info.ahead = max(info.ahead, int(cnt) if cnt.isdigit() else 0)
+            info.tail_pr = info.tail_pr or next((f"PR #{p[0]} was merged but this branch has newer commits"
+                                                 for p in prs if p[2] == name and p[1] == "MERGED"), "")
+        info.open_pr = next((p[0] for p in prs if p[2] == name and p[1] == "OPEN"), "")
+        infos.append(info)
+    return BranchScan(base, base_ref, current, infos, worktree_branches, notes)
 
-    def capped(items: list[str]) -> str:
-        shown = ", ".join(items[:_BRANCH_LIST_LIMIT])
-        return shown + (f", ... and {len(items) - _BRANCH_LIST_LIMIT} more" if len(items) > _BRANCH_LIST_LIMIT else "")
 
+def _capped(items: list[str], limit: int = _BRANCH_LIST_LIMIT) -> str:
+    return ", ".join(items[:limit]) + (f", ... and {len(items) - limit} more" if len(items) > limit else "")
+
+
+def merged_branches(a: "Agent") -> str:
+    """Answer "have all the branches been merged?" for every local and origin branch, read-only apart from an
+    optional `git fetch --prune origin` (asks like any change). A branch counts as merged if its tip is in the base
+    branch's history, or if GitHub shows a merged PR from that branch whose head is exactly that tip (which catches
+    squash and rebase merges, where the commits themselves never reach the base)."""
+    scan = scan_branches(a, "workflow merged-branches")
+    if isinstance(scan, str):
+        return scan
+    merged = [b.name + (f" ({b.via_pr})" if b.via_pr else "") + (" (current)" if b.name == scan.current else "")
+              for b in scan.branches if b.merged]
+    unmerged = [(b.name + (" (current)" if b.name == scan.current else ""),
+                 ", ".join([b.where, f"{b.ahead} commit(s) not in {scan.base_ref}",
+                            f"open PR #{b.open_pr}" if b.open_pr else (b.tail_pr or "no PR")]))
+                for b in scan.branches if not b.merged]
     total = len(merged) + len(unmerged)
     if total == 0:
-        lines = [f"There are no other branches besides `{base}`."]
+        lines = [f"There are no other branches besides `{scan.base}`."]
     elif not unmerged:
-        lines = [f"Yes: all {total} other branch(es) are merged into {base_ref}.", f"Merged: {capped(merged)}"]
+        lines = [f"Yes: all {total} other branch(es) are merged into {scan.base_ref}.", f"Merged: {_capped(merged)}"]
     else:
-        lines = [f"No: {len(unmerged)} of {total} branch(es) are not merged into {base_ref}.", "Not merged:"]
+        lines = [f"No: {len(unmerged)} of {total} branch(es) are not merged into {scan.base_ref}.", "Not merged:"]
         lines += [f"    {name}  ({d})" for name, d in unmerged[:_BRANCH_LIST_LIMIT]]
         if len(unmerged) > _BRANCH_LIST_LIMIT:
             lines.append(f"    ... and {len(unmerged) - _BRANCH_LIST_LIMIT} more")
         if merged:
-            lines.append(f"Merged ({len(merged)}): {capped(merged)}")
-    lines += [f"Note: {nt}." for nt in notes]
-    return "\n".join(lines)
+            lines.append(f"Merged ({len(merged)}): {_capped(merged)}")
+    return "\n".join(lines + [f"Note: {nt}." for nt in scan.notes])
+
+
+_NEVER_DELETE = {"main", "master", "develop", "trunk", "dev", "staging", "production", "prod"}
+
+
+def deletable_branches(a: "Agent") -> str:
+    """List the branches that are safe to delete, and why the others are not. Deletes nothing.
+
+    Safe means: merged into the base (by history, or by the exact head of a merged PR), not the base itself or a
+    conventional long-lived branch, not checked out here or in another worktree, and not the head of an open PR."""
+    scan = scan_branches(a, "workflow deletable-branches")
+    if isinstance(scan, str):
+        return scan
+    safe: list[BranchInfo] = []
+    keep: list[tuple[str, str]] = []
+    blocked: list[tuple[str, str]] = []
+    for b in scan.branches:
+        if b.name in _NEVER_DELETE or b.name.startswith(("release/", "release-")):
+            blocked.append((b.name, "long-lived branch"))
+        elif b.name == scan.current:
+            blocked.append((b.name, "checked out here"))
+        elif b.name in scan.worktree_branches:
+            blocked.append((b.name, "checked out in another worktree"))
+        elif b.open_pr:
+            keep.append((b.name, f"open PR #{b.open_pr}"))
+        elif not b.merged:
+            keep.append((b.name, f"not merged: {b.where}, {b.ahead} commit(s) not in {scan.base_ref}, "
+                                 + (b.tail_pr or "no PR")))
+        else:
+            safe.append(b)
+
+    lines: list[str] = []
+    if safe:
+        lines.append(f"You can delete {len(safe)} branch(es); each is merged into {scan.base_ref}:")
+        for b in safe:
+            how = f" ({b.via_pr})" if b.via_pr else ""
+            force = "  needs -D: squash/rebase-merged" if b.has_local and not b.local_by_ancestry else ""
+            lines.append(f"    {b.name}{how}  [{b.where}]{force}")
+        local_d = [b.name for b in safe if b.has_local and b.local_by_ancestry]
+        local_D = [b.name for b in safe if b.has_local and not b.local_by_ancestry]
+        remote = [b.name for b in safe if b.has_origin]
+        lines.append("To delete them (nothing was deleted):")
+        if local_d:
+            lines.append("    git branch -d " + " ".join(local_d))
+        if local_D:
+            lines.append("    git branch -D " + " ".join(local_D))
+        if remote:
+            lines.append("    git push origin --delete " + " ".join(remote))
+    else:
+        lines.append("Nothing is safe to delete right now.")
+    if keep:
+        lines.append(f"Keep ({len(keep)}):")
+        lines += [f"    {name}  ({why})" for name, why in keep[:_BRANCH_LIST_LIMIT]]
+        if len(keep) > _BRANCH_LIST_LIMIT:
+            lines.append(f"    ... and {len(keep) - _BRANCH_LIST_LIMIT} more")
+    if blocked:
+        lines.append("Can't delete: " + "; ".join(f"{name} ({why})" for name, why in blocked) + ".")
+    lines.append(f"Compared with {scan.base_ref}.")
+    return "\n".join(lines + [f"Note: {nt}." for nt in scan.notes])
 
 
 REGISTRY: dict[str, Callable[["Agent"], str]] = {"pr-branch": pr_branch, "rebase-pr": rebase_pr,
-                                                 "check-changes": check_changes, "merged-branches": merged_branches}
+                                                 "check-changes": check_changes, "merged-branches": merged_branches,
+                                                 "deletable-branches": deletable_branches}
