@@ -150,6 +150,17 @@ revert or bisect in progress. Lists are capped at 8 entries with an "and N more"
 anything ... uncommitted", "do I have uncommitted changes", "is the working tree clean"), so imperatives such as "commit all uncommitted
 changes" still reach the model.
 
+### The merged-branches workflow
+"Have all the branches been merged?" had no skill, and the model answered a different question (it ran `git status` and reported an
+untracked file). `merged-branches` is scripted: `git fetch --prune origin` (a MUTATE-class command, so it asks in manual mode; declining or
+failing just adds a staleness note, and plan mode skips it), then every local and `origin/*` branch except the base (origin/HEAD, else
+origin or local main/master) is checked two ways. A branch is merged if its tip is an ancestor of the base, or if `gh pr list` shows a MERGED
+PR from that branch whose head commit is exactly that tip, which is how squash and rebase merges (whose commits never reach the base) are
+recognised; a branch with commits after its merged PR is reported as not merged. Output lists the unmerged branches (where they live, how many
+commits the base lacks, open PR or none) and the merged ones. Older `gh` releases lack `headRefOid`, so the workflow retries with
+`commits[-1].oid`, which GitHub only allows for about 25 PRs per query; a full page adds a note that older PRs weren't checked. If `gh` fails
+the answer falls back to ancestry alone and says so.
+
 ### Trajectory trace
 With tracing on (`--trace`, `/trace`, `trace = true`) the agent emits one labelled event per step through an optional
 `trace_event(kind, title, body, status)` frontend hook: `model` (latency), `thinking`, `tool_call`, `tool_result`,
