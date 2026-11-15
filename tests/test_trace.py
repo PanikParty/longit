@@ -121,3 +121,23 @@ def test_config_and_flag(tmp_path):
     f.write_text("trace = true\n")
     assert config.load(f).trace is True
     assert config.load(tmp_path / "none.toml").trace is False
+
+
+def test_summary_counts_harness_model_calls_separately(repo):
+    git(repo, "checkout", "-q", "-b", "feat")
+    (repo / "b.txt").write_text("x\n")
+    git(repo, "add", "b.txt")
+    ui = TraceUI(answers=[Approval.YES])
+    be = FakeBackend([AssistantTurn(tool_calls=[call("commit")]),     # agent loop call 1
+                      AssistantTurn(text="Add b.txt"),                 # harness call: commit message
+                      AssistantTurn(text="Committed.")])               # agent loop call 2
+    Agent(be, repo, ui).run_turn("commit")
+    summary = ui.events[-1]
+    assert summary[0] == "summary" and summary[1].startswith("trajectory: 3 model call(s) (1 by the harness for text)")
+
+
+def test_summary_without_harness_calls_is_unchanged(repo):
+    ui = TraceUI()
+    be = FakeBackend([AssistantTurn(tool_calls=[call("status")]), AssistantTurn(text="clean")])
+    Agent(be, repo, ui).run_turn("status")
+    assert ui.events[-1][1].startswith("trajectory: 2 model call(s) - tool calls: git x1")

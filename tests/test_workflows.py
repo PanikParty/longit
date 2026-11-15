@@ -178,6 +178,7 @@ def test_trace_labels_workflow_steps_and_harness_calls(tmp_path, monkeypatch):
     assert any("separate model call: branch name" in t for t in titles)
     assert "model" not in [e[0] for e in ui.events]                      # the model never drove a step
     assert "tool calls: gh x1, git x" in ui.events[-1][1]
+    assert ui.events[-1][1].startswith("trajectory: 3 model call(s) (3 by the harness for text)")   # branch, commit, PR text
 
 
 def test_helpers(tmp_path):

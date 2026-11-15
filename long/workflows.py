@@ -99,7 +99,7 @@ def pr_branch(a: "Agent") -> str:
 
     slug = None
     try:
-        slug = commitmsg.generate_branch_slug(a.backend, a.cwd, paths)
+        slug = commitmsg.generate_branch_slug(a.harness_backend, a.cwd, paths)
     except BackendError as e:
         a.ui.notice(f"could not name the branch with the model ({e}); using a timestamp", error=True)
     base = "pr/" + (slug or time.strftime("changes-%Y%m%d-%H%M"))
