@@ -228,7 +228,8 @@ def truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     return f"{head}\n... [{len(text) - len(head) - len(tail)} characters omitted] ...\n{tail}"
 
 
-def _run(prog: str, argv: list[str], cwd: Path, timeout: float, extra_env: dict[str, str]) -> RunResult:
+def _run(prog: str, argv: list[str], cwd: Path, timeout: float, extra_env: dict[str, str],
+         max_chars: int | None = MAX_OUTPUT_CHARS) -> RunResult:
     env = dict(os.environ)
     env.update(extra_env)
     try:
@@ -239,13 +240,14 @@ def _run(prog: str, argv: list[str], cwd: Path, timeout: float, extra_env: dict[
     except FileNotFoundError:
         return RunResult(127, f"{prog} executable not found" + (" (install it from https://cli.github.com)" if prog == "gh" else ""))
     out = p.stdout + (("\n" if p.stdout and p.stderr else "") + p.stderr if p.stderr else "")
-    return RunResult(p.returncode, truncate(out))
+    return RunResult(p.returncode, truncate(out, max_chars) if max_chars else out)
 
 
-def run_git(argv: list[str], cwd: Path, timeout: float = 60.0) -> RunResult:
+def run_git(argv: list[str], cwd: Path, timeout: float = 60.0, max_chars: int | None = MAX_OUTPUT_CHARS) -> RunResult:
+    """`max_chars=None` returns the full output (for harness-internal reads that are never sent to the model)."""
     return _run("git", argv, cwd, timeout, dict(
         GIT_TERMINAL_PROMPT="0", GIT_PAGER="cat", PAGER="cat", GIT_EDITOR="true",
-        GIT_SEQUENCE_EDITOR="true", LC_ALL="C.UTF-8", GIT_OPTIONAL_LOCKS="0"))
+        GIT_SEQUENCE_EDITOR="true", LC_ALL="C.UTF-8", GIT_OPTIONAL_LOCKS="0"), max_chars)
 
 
 def run_gh(argv: list[str], cwd: Path, timeout: float = 120.0) -> RunResult:

@@ -78,7 +78,7 @@ A skill is a stored, named set of instructions for a kind of request. When your 
 adds its instructions to the model's context for that turn and says so (`skill: undo-last-commit (matched trigger ...)`).
 Skills only add guidance: every command still goes through the safety tiers, the current mode and your approvals.
 
-Built in: `github-repo` (publish to a new GitHub repo), `pr-branch` (put every change on a new `pr/...` branch, commit, push it to origin and open the pull request without asking you anything but approvals; try "prepare a pull request"), `undo-last-commit`, `whats-new` (summarize recent changes).
+Built in: `github-repo` (publish to a new GitHub repo), `pr-branch` (a scripted workflow: put every change on a new `pr/...` branch, commit, push it to origin and open the pull request, asking you only for approvals; try "prepare a pull request"), `undo-last-commit`, `whats-new` (summarize recent changes).
 Add your own as markdown files in `~/.config/long/skills/` (yours everywhere) or `.long/skills/` inside a repo
 (project skills); later layers override earlier ones by name: built-in, then yours, then the project's.
 
@@ -93,6 +93,11 @@ triggers: [tidy branches, clean up branches, "re:\bprune (old )?branches\b"]
 3. Delete the rest with `git branch -d`, one per call.
 ```
 
+- **Scripted skills.** A skill can say `workflow: NAME` in its header instead of leaving the steps to the model. The
+  harness then runs a fixed command sequence itself and uses the model only to write text (a branch name, a commit
+  message, a PR description). This is how `pr-branch` works, so it doesn't depend on a small model staying on task. Every
+  command still goes through the normal classification, mode and approval prompts, and plan mode only prints the plan.
+  Workflows live in the code (`long/workflows.py`); a skill file can name one but can't define one.
 - **Matching** (`[skills] match` in the config, or `--skill-match`): `triggers` (default) matches the phrases in
   `triggers:` as whole words, case-insensitively (`re:` prefix for a regex); the longest match wins. `model` also asks
   the model to pick from the skill descriptions when no trigger matches (one extra model call per request).

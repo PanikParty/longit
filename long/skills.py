@@ -33,6 +33,7 @@ class Skill:
     path: Path
     source: str  # "builtin" | "user" | "project"
     action: bool = False  # must end by changing something; replies that only talk are nudged to keep going
+    workflow: str = ""    # name of a scripted workflow (workflows.REGISTRY): the harness runs it instead of the model
 
 
 def _split_inline_list(inner: str) -> list[str]:
@@ -88,7 +89,8 @@ def parse_skill(text: str, path: Path, source: str) -> Skill:
                 raise ValueError(f"bad regex trigger {t!r}: {e}") from e
     desc = meta.get("description", "")
     action = str(meta.get("action", "")).strip().lower() in ("true", "yes", "1")
-    return Skill(name, desc if isinstance(desc, str) else "", triggers, body, path, source, action)
+    workflow = str(meta.get("workflow", "")).strip().lower()
+    return Skill(name, desc if isinstance(desc, str) else "", triggers, body, path, source, action, workflow)
 
 
 def _compile(trigger: str) -> re.Pattern[str]:
