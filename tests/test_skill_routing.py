@@ -13,10 +13,14 @@ ROUTES = {
         "Are there any branches left to merge?", "what branches still need merging", "is anything left to merge",
         "Are there any branches with changes to merge?", "which branches have changes to merge",
         "branches with unmerged changes", "is there a branch with changes not yet merged", "are there branches ahead of main",
-        "which branch has commits waiting to merge", "show unmerged changes"],
+        "which branch has commits waiting to merge", "show unmerged changes",
+        "are there any branches that need to be merged int main?", "are there any branches that need to be merged into main?",
+        "any branches that need merging", "which branches need to be merged", "are there branches to merge into main",
+        "branches waiting to be merged into main", "do any branches need merging", "is there anything that needs to be merged",
+        "does anything need merging", "which branches were merged last week?", "How many branches are not merged yet?"],
     "deletable-branches": [
         "Give me a list of all the branches that I can delete", "which branches can I delete", "what branches are safe to delete?",
-        "show me branches to delete", "any stale branches?"],
+        "show me branches to delete", "any stale branches?", "which branches can I delete once they're merged"],
     "pr-branch": ["prepare a pull request from all outstanding changes", "prepare a pull request", "make a PR branch from my changes"],
     "rebase-pr": ["rebase my PR", "update my branch", "bring my PR up to date", "catch up with main"],
     "undo-last-commit": ["undo the last commit", "uncommit"],
@@ -27,7 +31,10 @@ ROUTES = {
 NO_SKILL = ["merge my branch into main", "merge the changes from feature into main", "merge the remaining branches into main",
             "what changes are in this branch", "commit the changes in this branch", "commit all uncommitted changes",
             "stash my uncommitted changes", "delete merged branches", "delete the branch foo", "create a branch to merge later",
-            "create a branch to delete the file", "squash my last 3 commits", "rebase -i HEAD~3", "what branches exist"]
+            "create a branch to delete the file", "squash my last 3 commits", "rebase -i HEAD~3", "what branches exist",
+            "merge the branches into main", "what happens if I merge this branch", "how do I merge a branch into main",
+            "should I merge this branch?", "does merging a branch rewrite history", "why was the branch not merged by the bot",
+            "if I merge branches will it delete them"]
 
 
 @pytest.mark.parametrize("skill,prompt", [(s, p) for s, ps in ROUTES.items() for p in ps])
