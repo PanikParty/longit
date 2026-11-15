@@ -129,6 +129,8 @@ secret-looking files via `:(exclude,literal)` pathspecs, commits, pushes `-u ori
 only prints the plan. Workflows are registered in code, never loaded from skill files, so an untrusted project skill can select
 one but not define behaviour. An unknown workflow name falls back to the model with a warning. In the trace, each step is
 labelled `workflow NAME - step N`.
+The closing `trajectory:` line counts model calls from the agent loop plus, shown separately, the harness's own tool-less text calls
+(commit message, PR text, branch name, model skill choice), which go through `Agent.harness_backend` so they are counted.
 
 ### Trajectory trace
 With tracing on (`--trace`, `/trace`, `trace = true`) the agent emits one labelled event per step through an optional

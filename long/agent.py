@@ -62,6 +62,18 @@ APPROVAL_HINT = ("\n\n(system) The user is approving what you just proposed. Do 
                  "call the tool for the first step now.")
 
 
+class _CountedBackend:
+    """Hands the harness's own text-writing calls (commit message, PR text, branch name, skill choice) to the real
+    backend while counting them, so the trace can report them next to the agent loop's calls."""
+
+    def __init__(self, inner: Backend, on_call: Any):
+        self._inner, self._on_call = inner, on_call
+
+    def chat(self, messages: list[dict[str, Any]], tools_: list[dict[str, Any]]) -> AssistantTurn:
+        self._on_call()
+        return self._inner.chat(messages, tools_)
+
+
 def _pretty_args(raw: str) -> str:
     try:
         return json.dumps(json.loads(raw), indent=2)
@@ -142,6 +154,7 @@ class Agent:
         self.mode = mode
         self.skills = skills
         self.skill_match = skill_match  # "off" | "triggers" | "model"
+        self._harness_calls = 0
         self._skill_trust: dict[str, bool] = {}  # project skills the user has approved/declined this session
         self.allowed: set[str] = set()
         self._ran_fs = False
@@ -171,16 +184,27 @@ class Agent:
 
     def run_turn(self, user_text: str, skill: skillmod.Skill | None = None) -> None:
         """`skill` forces a specific stored skill (an explicit /skill request); otherwise one may be matched."""
-        self._model_calls = 0
+        self._model_calls = 0     # calls made by the agent loop
+        self._harness_calls = 0   # separate tool-less calls the harness made itself, to write text
         self._tool_calls: dict[str, int] = {}
         try:
             self._run_turn(user_text, skill)
         finally:
-            if self.tracing and (self._model_calls or self._tool_calls):
+            if self.tracing and (self._model_calls or self._harness_calls or self._tool_calls):
                 tc = ", ".join(f"{n} x{c}" for n, c in sorted(self._tool_calls.items())) or "none"
                 bad = sum(1 for _, o, _, _ in self._log if o in ("denied", "blocked", "planned"))
-                self._trace("summary", f"trajectory: {self._model_calls} model call(s) - tool calls: {tc}"
+                total = self._model_calls + self._harness_calls
+                by_harness = f" ({self._harness_calls} by the harness for text)" if self._harness_calls else ""
+                self._trace("summary", f"trajectory: {total} model call(s){by_harness} - tool calls: {tc}"
                                        + (f" - {bad} denied/blocked/skipped" if bad else ""))
+
+    @property
+    def harness_backend(self) -> Backend:
+        """The backend, for calls the harness makes itself; they are counted in the trajectory summary."""
+        return _CountedBackend(self.backend, self._count_harness_call)  # type: ignore[return-value]
+
+    def _count_harness_call(self) -> None:
+        self._harness_calls += 1
 
     # ---- skills -------------------------------------------------------
     def _select_skill(self, user_text: str, explicit: skillmod.Skill | None) -> skillmod.Skill | None:
@@ -207,7 +231,7 @@ class Agent:
         assert self.skills is not None
         candidates = self.skills.all()
         try:
-            reply = self.backend.chat(skillmod.model_select_messages(candidates, user_text), []).text
+            reply = self.harness_backend.chat(skillmod.model_select_messages(candidates, user_text), []).text
         except BackendError as e:
             self.ui.notice(f"skill matching failed: {e}", error=True)
             return None
@@ -502,7 +526,7 @@ class Agent:
             self._offer_gitignore()
         if is_gh and commitmsg.needs_pr_text(argv):
             try:
-                pr_text = commitmsg.generate_pr_text(self.backend, self.cwd, argv)
+                pr_text = commitmsg.generate_pr_text(self.harness_backend, self.cwd, argv)
             except BackendError as e:
                 self.ui.notice(f"could not write the pull request text: {e}", error=True)
                 return (f"error: no pull request title/description was given and generating them failed ({e}). "
@@ -515,7 +539,7 @@ class Agent:
                             pr_text[0] + "\n\n" + pr_text[1])
         if not is_gh and commitmsg.needs_message(argv):
             try:
-                generated = commitmsg.generate(self.backend, self.cwd, commitmsg.includes_all_tracked(argv))
+                generated = commitmsg.generate(self.harness_backend, self.cwd, commitmsg.includes_all_tracked(argv))
             except BackendError as e:
                 self.ui.notice(f"could not generate a commit message: {e}", error=True)
                 return f"error: no commit message was given and generating one failed ({e}). Pass -m with a message."
