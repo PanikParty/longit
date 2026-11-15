@@ -2,7 +2,7 @@
 name: check-changes
 description: Say whether anything is uncommitted or changed in the working tree (read-only)
 workflow: check-changes
-triggers: [git status, working tree status, "re:\b(is|are) there (any|anything|something)\b[^.?!]*\b(uncommitted|changed|changes|modified|unstaged|untracked|dirty|to commit)\b", "re:\bdo i have (any |some )?(uncommitted|unstaged|unsaved|local|pending) (changes|work|files)\b", "re:\b(is|are) (the |my |this )?(working (tree|directory)|tree|repo|repository|checkout)( \w+)? (clean|dirty)\b", "re:\b(check|show|list)( me)?( for)?( any| all| the)? (uncommitted|unstaged|local|pending) (changes|files|work)\b"]
+triggers: [git status, working tree status, "re:\b(is|are) there (any|anything|something)\b(?:(?!\bbranch)[^.?!])*\b(uncommitted|changed|changes|modified|unstaged|untracked|dirty|to commit)\b", "re:\bdo i have (any |some )?(uncommitted|unstaged|unsaved|local|pending) (changes|work|files)\b", "re:\b(is|are) (the |my |this )?(working (tree|directory)|tree|repo|repository|checkout)( \w+)? (clean|dirty)\b", "re:\b(check|show|list)( me)?( for)?( any| all| the)? (uncommitted|unstaged|local|pending) (changes|files|work)\b"]
 ---
 Goal: tell the user plainly whether anything in the working tree is uncommitted or changed.
 
