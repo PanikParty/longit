@@ -23,8 +23,9 @@ class OpenAICompatBackend:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        body = {"model": self.model, "messages": messages, "tools": tools,
-                "tool_choice": "auto", "temperature": self.temperature}
+        body: dict[str, Any] = {"model": self.model, "messages": messages, "temperature": self.temperature}
+        if tools:  # an empty tools array is rejected by some servers
+            body.update(tools=tools, tool_choice="auto")
         try:
             r = httpx.post(f"{self.base_url}/chat/completions", json=body, headers=headers, timeout=self.timeout)
         except httpx.HTTPError as e:
