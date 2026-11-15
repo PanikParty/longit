@@ -24,7 +24,7 @@ safety layer decides which of them may run unattended.
 - [uv](https://docs.astral.sh/uv/) (no `pip install` needed) and Python 3.11+
 - `git`
 - [`gh`](https://cli.github.com) (optional, only for creating GitHub repositories; run `gh auth login` first)
-- A model: for example [Ollama](https://ollama.com) with `ollama pull qwen2.5-coder:7b`
+- A model: for example [Ollama](https://ollama.com) with `ollama pull qwen2.5-coder:14b`
 
 ## Install and run
 
@@ -89,7 +89,7 @@ max_steps = 12
 
 [openai]
 base_url = "http://localhost:11434/v1"
-model = "qwen2.5-coder:7b"
+model = "qwen2.5-coder:14b"
 api_key_env = "OPENAI_API_KEY"   # name of the env var holding the key, if the server needs one
 
 [llamacpp]
@@ -109,6 +109,78 @@ n_gpu_layers = -1
 
 Small models are less reliable at tool calling. If `long` picks the wrong tool or garbles a call,
 try a larger model (`/model`).
+
+## Using a model on a remote host
+
+`long` runs on your machine, in your repository; only the model lives elsewhere. It talks to any
+server that speaks the OpenAI chat API (`POST {base_url}/chat/completions`), so point `base_url` at the host.
+
+What the server needs:
+
+- **Tool calling.** The model must support function calls (Qwen2.5-Coder, Llama 3.1+ and similar do).
+- **`GET {base_url}/models`** (optional). It powers `/model` and the "available models" hint on a 404.
+- Reachable from your machine, with enough GPU or RAM for the model you pick.
+
+### Ollama on another machine
+
+On the remote host, make Ollama listen on the network, then pull a model:
+
+```bash
+OLLAMA_HOST=0.0.0.0:11434 ollama serve      # or set OLLAMA_HOST in the service's environment
+ollama pull qwen2.5-coder:14b
+```
+
+On your machine, point `long` at it (replace `gpu-box` with the host name or IP):
+
+```bash
+uv run long --base-url http://gpu-box:11434/v1 --model qwen2.5-coder:14b
+```
+
+or make it permanent in `~/.config/long/config.toml`:
+
+```toml
+[openai]
+base_url = "http://gpu-box:11434/v1"
+model = "qwen2.5-coder:14b"
+```
+
+Ollama has no authentication, so don't expose it to the internet. Use a trusted LAN, a VPN, or an SSH
+tunnel (below).
+
+### Over an SSH tunnel (recommended for anything not on a trusted LAN)
+
+Keep the server bound to `localhost` on the remote host and forward the port:
+
+```bash
+ssh -N -L 11434:localhost:11434 you@gpu-box     # leave running in another terminal
+uv run long                                     # the default base_url (localhost:11434) now reaches gpu-box
+```
+
+If something is already using local port 11434, forward a different one
+(`-L 11500:localhost:11434`) and pass `--base-url http://localhost:11500/v1`.
+
+### A hosted or authenticated API
+
+For OpenAI, a vLLM or LiteLLM gateway, or any server that wants a bearer token, put the key in an
+environment variable and tell `long` its name. The key itself is never stored in the config file.
+
+```bash
+export OPENAI_API_KEY=...        # or any variable name you like
+uv run long --base-url https://api.openai.com/v1 --model <model-name>
+# custom variable name:
+export MY_GATEWAY_KEY=...
+uv run long --base-url https://llm.example.com/v1 --model <model-name> --api-key-env MY_GATEWAY_KEY
+```
+
+### Things to know
+
+- **Your repo context goes to that host.** Each request includes the repository snapshot (branch, `git status`,
+  recent commits, remotes) and the output of every command the model runs, such as diffs and file listings.
+  Use a host you trust, and prefer `https://` or an SSH tunnel over plain `http://` across untrusted networks.
+- Requests time out after 5 minutes. A cold model on a slow host can take a while to load on the first request.
+- Use `/model` to see what the server offers and switch without restarting.
+- Connection errors (`request to … failed`) mean the host or port is unreachable; a `404 … model not found`
+  lists the models the server actually has.
 
 ## Development
 
