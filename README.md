@@ -1,30 +1,41 @@
 # long
 
 A natural-language interface to git. Type what you want ("squash my last 3 commits",
-"what changed on main since Tuesday?"), a model decides which git commands to run, and a
-safety layer decides which of them may run unattended.
+"what changed on main since Tuesday?", "prepare a pull request"), and `long` works out the git commands, runs the
+safe ones, and asks you before it changes anything.
 
 ```
-› create a github repo for this project and push everything
-  $ git status --short
-  $ git add -A                       [changes repo]  run? [y/N/a]
-  $ git commit -m "Initial commit"   [changes repo]  run? [y/N/a]
-  $ gh repo create long --private --source=. --remote=origin
-  $ git push -u origin HEAD
+› prepare a pull request from all outstanding changes
+skill: pr-branch (matched trigger 'prepare a pull request')
+  $ git status --short --branch
+  $ git remote get-url origin
+  $ git switch -c pr/add-skill-matching                      [changes repo]  run? [y/N/a]
+  $ git add -A                                               [changes repo]  run? [y/N/a]
+  $ git commit -m 'Add skill matching'                       [changes repo]  run? [y/N/a]
+  $ git push -u origin pr/add-skill-matching                 [changes repo]  run? [y/N/a]
+  $ gh pr create --title 'Add skill matching' --body '...'   [changes repo]  run? [y/N/a]
+Opened a pull request: https://github.com/you/repo/pull/3
 ```
 
-- Works with a local or remote model: any OpenAI-compatible server (Ollama, llama-server,
-  LM Studio, vLLM, OpenAI) or an in-process GGUF model through llama.cpp.
-- The model never gets a shell. Its tools are `git`, a tiny `gh` (create repos), and `ls`, `pwd` and `cd` (confined to the project; leaving it needs your approval).
-- Read-only commands run immediately. Anything that changes the repo is shown and needs your approval.
-- `git commit` without a message, and `gh pr create` without a title and description, get them written by the model from the diff and shown to you in the approval prompt.
+- **Local or remote model.** Any OpenAI-compatible server (Ollama, llama-server, LM Studio, vLLM, OpenAI), or an
+  in-process GGUF model through llama.cpp.
+- **No shell for the model.** Its tools are `git`, a small allow-listed `gh` (create a repo, open and read pull
+  requests), and `ls`, `pwd` and `cd` (confined to the project; leaving it needs your approval).
+- **You stay in control.** Read-only commands run immediately. Anything that changes something is shown and needs
+  your approval; destructive commands always ask. Three modes: `manual`, `auto`, `plan`.
+- **The harness writes the boilerplate.** A `git commit` with no message and a `gh pr create` with no title or
+  description get them written by the model from the diff, and you see the real text in the approval prompt.
+- **Skills.** Stored instructions for kinds of request, matched to your prompt. Some are scripted workflows that the
+  harness runs step by step itself, so a small model can't wander off.
+- **See everything.** `--trace` shows the model's thinking, every tool call and its complete result, and everything
+  the harness did on its own.
 - Works in directories that aren't git repositories yet; `git init` is just another approved step.
 
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/) (no `pip install` needed) and Python 3.11+
 - `git`
-- [`gh`](https://cli.github.com) (optional, only for creating GitHub repositories; run `gh auth login` first)
+- [`gh`](https://cli.github.com), only for creating GitHub repositories and pull requests (run `gh auth login` first)
 - A model: for example [Ollama](https://ollama.com) with `ollama pull qwen2.5-coder:14b`
 
 ## Install and run
@@ -41,7 +52,7 @@ Or do it by hand:
 ```bash
 uv sync                    # create .venv and install dependencies
 uv run long                # interactive mode in the current directory
-uv run long "show me the last 5 commits"     # one-shot
+uv run long "show me the last 5 commits"     # one-shot request
 uv run long -C ~/code/app  # work in another directory
 ```
 
@@ -55,32 +66,93 @@ For the in-process llama.cpp backend, add the extra: `uv sync --extra local`.
 
 ## Usage
 
-Describe what you want in plain English. Slash commands:
+Describe what you want in plain English. In the interactive prompt these slash commands are available:
 
 | Command | What it does |
 |---|---|
 | `/help` | show help |
-| `/status` | `git status` of the current repo |
+| `/status` | `git status` of the current directory |
+| `/mode` | show or set the mode: `manual`, `auto` or `plan` (shortcuts `/manual`, `/auto`, `/plan`) |
 | `/skills`, `/skill NAME [request]` | list stored skills; run one explicitly |
 | `/trace` | toggle the trajectory trace (`/trace on`, `/trace off`) |
-| `/mode` | show or set the mode: `manual`, `auto` or `plan` (shortcuts `/manual`, `/auto`, `/plan`) |
 | `/model` | list the server's models and pick one (`/model NAME` or `/model N` to switch directly) |
 | `/backend` | show the active backend and model |
 | `/allowed` | subcommands auto-approved this session |
 | `/clear` | forget the conversation |
 | `/exit` | quit (Ctrl-D also works) |
 
-Ctrl-C cancels the current step.
+Ctrl-C cancels the current step. A bare "yes", "go" or "continue" is treated as approval of what the model just
+proposed.
 
-### Skills
+## Safety
 
-A skill is a stored, named set of instructions for a kind of request. When your prompt matches one, `long`
-adds its instructions to the model's context for that turn and says so (`skill: undo-last-commit (matched trigger ...)`).
+### Approvals
+
+| Risk | Behaviour | Examples |
+|---|---|---|
+| READ | runs automatically | `status`, `log`, `diff`, `show`, `branch` (list), `gh pr view` |
+| MUTATE | shows the command and asks `[y/N/a]`; `a` allows that subcommand for the session | `add`, `commit`, `checkout`, `merge`, `push`, `gh repo create --private`, `gh pr create` |
+| DESTRUCTIVE | shows a warning and asks every time | `reset --hard`, `clean -f`, `push --force`, `branch -D`, `gh repo create --public` |
+| BLOCKED | refused, and the model is told why | `-c` config overrides, `--exec`, aliases, `-C` outside the project, any `gh` command not listed below |
+
+Unknown git subcommands are treated as mutating. Even in `auto` mode, destructive commands still ask and blocked
+ones stay blocked; there is no "approve everything" mode. With no terminal to answer (for example `< /dev/null`),
+a prompt counts as "no".
+
+### Modes
+
+| Mode | Behaviour |
+|---|---|
+| `manual` (default) | read-only commands run; every change asks first |
+| `auto` | reads and ordinary changes (`add`, `commit`, `push`, `gh pr create`, private `gh repo create`, a generated `.gitignore`) run without asking; DESTRUCTIVE commands, leaving the project with `cd`, and anything BLOCKED behave as before |
+| `plan` | read-only: the model investigates and replies with a plan; any change it attempts is skipped and nothing is modified. Scripted workflows print their plan |
+
+Switch inside the REPL with `/mode manual|auto|plan` (or `/manual`, `/auto`, `/plan`). Start in a mode with
+`--mode`, or set `mode = "auto"` in the config. A typical flow is to ask in `plan` mode, read the plan, switch to
+`manual` or `auto`, and say "go".
+
+### GitHub access (`gh`)
+
+The `gh` tool is deliberately tiny. Only these are allowed; everything else is blocked:
+
+| Command | Risk | Notes |
+|---|---|---|
+| `gh auth status`, `gh repo view` | READ | no `--web` |
+| `gh pr view`, `gh pr list`, `gh pr status` | READ | no `--web`, no `--repo/-R` |
+| `gh repo create NAME --private\|--public` | MUTATE / DESTRUCTIVE | a visibility flag is required; `--public` is DESTRUCTIVE; `--source`, `--remote`, `--description` allowed |
+| `gh pr create` | MUTATE | opens a pull request for the pushed branch. Allowed: `--title`, `--body`, `--base`, `--head`, `--fill`, `--draft`. No `--body-file`, `--template`, `--web`, `--repo` |
+
+### Other safeguards
+
+- **`.gitignore` guard.** Before `git add -A` (or `--all`, `.`) in a repo with no `.gitignore`, `long` looks for files that
+  shouldn't be committed (`.venv/`, `__pycache__/`, `node_modules/`, `.env`, `.DS_Store`, ...) and asks whether to create
+  a `.gitignore` for them first.
+- **Secrets.** The `pr-branch` workflow leaves out files that look like secrets (`.env`, `*.pem`, `*.key`,
+  `credentials*`, SSH keys) and tells you which.
+- **Filesystem confinement.** `ls` and `cd` stay inside the project (symlinks that point outside are refused).
+  `cd` out of it asks for approval and starts a fresh project context.
+- **Invented output and loops.** Replies containing made-up tool results, or a copy of the model's own instructions,
+  are rejected; a model that only describes a plan, asks permission, or repeats itself is nudged to actually call a
+  tool, and `long` gives up with a message after a couple of tries.
+- **Project skills are untrusted** (see below).
+
+## Skills
+
+A skill is a stored, named set of instructions for a kind of request. When your prompt matches one, `long` adds its
+instructions to the model's context for that turn and says so (`skill: undo-last-commit (matched trigger ...)`).
 Skills only add guidance: every command still goes through the safety tiers, the current mode and your approvals.
 
-Built in: `github-repo` (publish to a new GitHub repo), `pr-branch` (a scripted workflow: put every change on a new `pr/...` branch, commit, push it to origin and open the pull request, asking you only for approvals; try "prepare a pull request"), `undo-last-commit`, `whats-new` (summarize recent changes).
+Built in:
+
+| Skill | What it does |
+|---|---|
+| `pr-branch` | scripted workflow: put every change on a new `pr/...` branch, commit, push to `origin` and open the pull request, asking you only for approvals. Try "prepare a pull request" |
+| `github-repo` | publish the current project to a new private GitHub repo and push |
+| `undo-last-commit` | undo the latest commit but keep its changes (offers `revert` if it was already pushed) |
+| `whats-new` | summarize recent changes (since a tag, a date, or the last commits) |
+
 Add your own as markdown files in `~/.config/long/skills/` (yours everywhere) or `.long/skills/` inside a repo
-(project skills); later layers override earlier ones by name: built-in, then yours, then the project's.
+(project skills). Later layers override earlier ones by name: built-in, then yours, then the project's.
 
 ```markdown
 ---
@@ -93,20 +165,26 @@ triggers: [tidy branches, clean up branches, "re:\bprune (old )?branches\b"]
 3. Delete the rest with `git branch -d`, one per call.
 ```
 
-- **Scripted skills.** A skill can say `workflow: NAME` in its header instead of leaving the steps to the model. The
-  harness then runs a fixed command sequence itself and uses the model only to write text (a branch name, a commit
-  message, a PR description). This is how `pr-branch` works, so it doesn't depend on a small model staying on task. Every
-  command still goes through the normal classification, mode and approval prompts, and plan mode only prints the plan.
-  Workflows live in the code (`long/workflows.py`); a skill file can name one but can't define one.
-- **Matching** (`[skills] match` in the config, or `--skill-match`): `triggers` (default) matches the phrases in
-  `triggers:` as whole words, case-insensitively (`re:` prefix for a regex); the longest match wins. `model` also asks
-  the model to pick from the skill descriptions when no trigger matches (one extra model call per request).
-  `off` never auto-matches. `--no-skills` doesn't load any.
+| Header field | Meaning |
+|---|---|
+| `name` | lowercase letters, digits, `-` and `_` (defaults to the file name) |
+| `description` | one line; used by `model` matching and shown by `/skills` |
+| `triggers` | phrases matched as whole words, case-insensitively; a `re:` prefix makes one a regex |
+| `action` | `true` if the skill must end by changing something: replies that only talk are nudged to keep going |
+| `workflow` | name of a scripted workflow (below) |
+
+- **Scripted skills.** `workflow: NAME` makes the harness run a fixed command sequence itself and use the model only
+  to write text (a branch name, a commit message, a PR description). This is how `pr-branch` works, so it doesn't
+  depend on a small model staying on task. Every command still goes through classification, the mode and the
+  approval prompts. Workflows live in the code (`long/workflows.py`); a skill file can name one but can't define one.
+- **Matching** (`[skills] match` in the config, or `--skill-match`): `triggers` (default) uses the `triggers:` phrases;
+  the longest match wins. `model` also asks the model to pick from the descriptions when no trigger matches (one extra
+  model call per request). `off` never auto-matches. `--no-skills` doesn't load any.
 - **Explicit:** `/skills` lists them; `/skill NAME [request]` runs one regardless of matching.
 - **Project skills are untrusted.** They come from files in the repository you opened, so `long` shows what the skill
   says and asks once per session before using one.
 
-### Trajectory trace
+## Trajectory trace
 
 `long --trace` (or `/trace on` in the REPL, or `trace = true` in the config) shows what the model and the harness
 actually did, step by step, with nothing truncated:
@@ -118,36 +196,14 @@ actually did, step by step, with nothing truncated:
 -- step 1 - result (what the model received) [ok]   the complete output, exactly what went back to the model
 -- step 2 - answer                          the final reply
 -- harness - ...                            things `long` did itself: recovered a call written as text, rejected
-                                            invented output, nudged the model, wrote a commit message
+                                            invented output, nudged the model, created a .gitignore, wrote a commit
+                                            message, PR text or branch name
+-- workflow pr-branch - step 3 - tool call  scripted workflow steps, labelled by number
 -- trajectory: 2 model call(s) - tool calls: git x1
 ```
 
 "Thinking" is what the model says about its own reasoning (including `<think>` blocks and the `reasoning` field some
 servers return). It is not verified; the tool call and result lines are the ground truth of what ran.
-
-### Approvals
-
-| Risk | Behaviour | Examples |
-|---|---|---|
-| READ | runs automatically | `status`, `log`, `diff`, `show`, `branch` (list) |
-| MUTATE | shows the command and asks `[y/N/a]`; `a` allows that subcommand for the session | `add`, `commit`, `checkout`, `merge`, `push`, `gh repo create --private`, `gh pr create` |
-| DESTRUCTIVE | shows a warning and asks every time | `reset --hard`, `clean -f`, `push --force`, `branch -D`, `gh repo create --public` |
-| BLOCKED | refused, and the model is told why | `-c` config overrides, `--exec`, aliases, `-C` outside the repo |
-
-Unknown subcommands are treated as mutating. Even in `auto` mode, destructive commands still ask
-and blocked ones stay blocked; there is no "approve everything" mode.
-
-### Modes
-
-| Mode | Behaviour |
-|---|---|
-| `manual` (default) | read-only commands run; every change asks first |
-| `auto` | reads and ordinary changes (`add`, `commit`, `push`, private `gh repo create`, a generated `.gitignore`) run without asking; DESTRUCTIVE commands, leaving the project with `cd`, and anything BLOCKED behave as before |
-| `plan` | read-only: the model investigates and replies with a numbered plan; any change it attempts is skipped and nothing is modified |
-
-Switch inside the REPL with `/mode manual|auto|plan` (or `/manual`, `/auto`, `/plan`); `/mode` alone shows the
-current one. Start in a mode with `--mode`, or set `mode = "auto"` in the config. A typical flow is to ask in
-`plan` mode, read the plan, switch to `manual` or `auto`, and say "go".
 
 ## Configuration
 
@@ -176,7 +232,7 @@ n_gpu_layers = -1
 | Flag | Meaning |
 |---|---|
 | `-C, --repo PATH` | directory to work in (default: current) |
-| `--config FILE` | alternate config file |
+| `--config FILE` | alternate config file (skills are read from `skills/` next to it) |
 | `--backend {openai,llamacpp}` | choose the backend |
 | `--base-url URL`, `--model NAME`, `--api-key-env VAR` | OpenAI-compatible backend |
 | `--model-path FILE`, `--n-ctx N` | llama.cpp backend |
@@ -184,9 +240,7 @@ n_gpu_layers = -1
 | `--no-skills`, `--skill-match {off,triggers,model}` | skills (see above) |
 | `--trace` | show the full trajectory (thinking, tool calls, complete results) |
 | `--max-steps N` | cap on model/tool round trips per request |
-
-Small models are less reliable at tool calling. If `long` picks the wrong tool or garbles a call,
-try a larger model (`/model`).
+| `--version` | print the version |
 
 ## Using a model on a remote host
 
@@ -253,18 +307,37 @@ uv run long --base-url https://llm.example.com/v1 --model <model-name> --api-key
 ### Things to know
 
 - **Your repo context goes to that host.** Each request includes the repository snapshot (branch, `git status`,
-  recent commits, remotes) and the output of every command the model runs, such as diffs and file listings.
+  recent commits, remotes) and the output of every command the model runs, such as diffs and file listings. The
+  separate calls that write commit messages and PR text include the relevant diff.
   Use a host you trust, and prefer `https://` or an SSH tunnel over plain `http://` across untrusted networks.
 - Requests time out after 5 minutes. A cold model on a slow host can take a while to load on the first request.
 - Use `/model` to see what the server offers and switch without restarting.
-- Connection errors (`request to … failed`) mean the host or port is unreachable; a `404 … model not found`
-  lists the models the server actually has.
+
+## Troubleshooting
+
+| Symptom | What to do |
+|---|---|
+| `request to … failed` / connection refused | the model server isn't running or `base_url` is wrong |
+| `404 … model not found` | the error lists the models the server has; pick one with `/model` or `--model` |
+| the model writes JSON instead of acting, ends with an empty reply, or loops | `long` recovers or nudges where it can. A larger model (`/model`) helps most; `--trace` shows exactly what happened, and `/clear` resets the conversation |
+| `gh executable not found` or a PR step fails | install [`gh`](https://cli.github.com) and run `gh auth login`; the branch is already pushed by then |
+| prompts never get answered in a script or CI | approvals need a terminal. Use `--mode auto` (destructive commands are still declined) |
+| a project skill is ignored | you declined it at the prompt; it won't be asked again this session |
 
 ## Development
 
 ```bash
 uv run pytest
 ```
+
+| Path | What lives there |
+|---|---|
+| `long/agent.py` | the model/tool loop, modes, guards, skill selection, tracing |
+| `long/safety.py`, `long/tools.py`, `long/fs.py` | command classification, the `git`/`gh` runners, `ls`/`pwd`/`cd` |
+| `long/commitmsg.py`, `long/gitignore.py` | harness-written commit, PR and branch text; the `.gitignore` guard |
+| `long/skills.py`, `long/workflows.py`, `long/builtin_skills/` | skills, scripted workflows, the built-in skills |
+| `long/llm/` | model backends (OpenAI-compatible, llama.cpp) |
+| `long/ui.py`, `long/cli.py`, `long/config.py` | terminal UI and slash commands, flags, config |
 
 See [DESIGN.md](DESIGN.md) for the architecture and safety model.
 
