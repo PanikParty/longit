@@ -246,4 +246,108 @@ def rebase_pr(a: "Agent") -> str:
             + (f"\nPull request: {url}" if url else ""))
 
 
-REGISTRY: dict[str, Callable[["Agent"], str]] = {"pr-branch": pr_branch, "rebase-pr": rebase_pr}
+# ---- the check-changes workflow ----------------------------------------------------------------------
+_CONFLICT_CODES = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
+_IN_PROGRESS = (("rebase-merge", "a rebase"), ("rebase-apply", "a rebase"), ("MERGE_HEAD", "a merge"),
+                ("CHERRY_PICK_HEAD", "a cherry-pick"), ("REVERT_HEAD", "a revert"), ("BISECT_LOG", "a bisect"))
+_LIST_LIMIT = 8
+
+
+@dataclass
+class TreeState:
+    staged: list[tuple[str, str]]     # (status letter, path)
+    unstaged: list[tuple[str, str]]
+    untracked: list[str]
+    conflicted: list[str]
+
+    @property
+    def dirty(self) -> bool:
+        return bool(self.staged or self.unstaged or self.untracked or self.conflicted)
+
+
+def tree_state(cwd: Path) -> TreeState:
+    """Parse `git status --porcelain=v1 -z` into staged / unstaged / untracked / conflicted."""
+    r = tools.run_git(["status", "--porcelain=v1", "-uall", "-z"], cwd, timeout=30, max_chars=None)
+    st = TreeState([], [], [], [])
+    parts, i = (r.output.split("\0") if r.exit_code == 0 else []), 0
+    while i < len(parts):
+        entry = parts[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        xy, path = entry[:2], entry[3:]
+        if "R" in xy or "C" in xy:
+            i += 1  # original path
+        if xy == "??":
+            st.untracked.append(path)
+        elif xy in _CONFLICT_CODES:
+            st.conflicted.append(path)
+        else:
+            if xy[0] not in " ?!":
+                st.staged.append((xy[0], path))
+            if xy[1] not in " ?!":
+                st.unstaged.append((xy[1], path))
+    return st
+
+
+def _listing(title: str, items: list[str]) -> list[str]:
+    out = [f"{title} ({len(items)}):"] + [f"    {it}" for it in items[:_LIST_LIMIT]]
+    if len(items) > _LIST_LIMIT:
+        out.append(f"    ... and {len(items) - _LIST_LIMIT} more")
+    return out
+
+
+def check_changes(a: "Agent") -> str:
+    """Answer "is there anything uncommitted/changed here?" with read-only commands only."""
+    label, n = "workflow check-changes", 0
+
+    def step(argv: list[str]) -> StepResult:
+        nonlocal n
+        n += 1
+        return a.run_tool("git", argv, f"{label} - step {n}")
+
+    def q(*argv: str) -> "tools.RunResult":
+        return tools.run_git(list(argv), a.cwd, timeout=30, max_chars=None)
+
+    if not step(["status", "--short", "--branch"]).ok:
+        return "This isn't a git repository, so there is nothing to check."
+    st = tree_state(a.cwd)
+    branch = q("branch", "--show-current").output.strip()
+    where = f"`{branch}`" if branch else "the detached HEAD"
+    stashes = len([ln for ln in step(["stash", "list"]).output.splitlines() if ln.strip()])
+
+    lines = ([f"Yes: {where} has uncommitted changes."] if st.dirty
+             else [f"No: nothing is uncommitted, the working tree on {where} is clean."])
+    if st.conflicted:
+        lines += _listing("Conflicted", st.conflicted)
+    if st.staged:
+        lines += _listing("Staged, ready to commit", [f"{c} {p}" for c, p in st.staged])
+    if st.unstaged:
+        lines += _listing("Changed but not staged", [f"{c} {p}" for c, p in st.unstaged])
+    if st.untracked:
+        lines += _listing("Untracked", st.untracked)
+
+    gitdir = q("rev-parse", "--git-dir").output.strip()
+    ops = sorted({label_ for name, label_ in _IN_PROGRESS if gitdir and (a.cwd / gitdir / name).exists()})
+    if ops:
+        lines.append(f"You're in the middle of {' and '.join(ops)}.")
+    upstream = q("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if branch and upstream.exit_code == 0:
+        counts = q("rev-list", "--left-right", "--count", "@{u}...HEAD").output.split()
+        behind, ahead = (int(counts[0]), int(counts[1])) if len(counts) == 2 else (0, 0)
+        up = upstream.output.strip()
+        if ahead or behind:
+            bits = ([f"{ahead} commit(s) ahead of {up} (not pushed)"] if ahead else []) + (
+                [f"{behind} behind it"] if behind else [])
+            lines.append("Also: " + ", ".join(bits) + ".")
+        else:
+            lines.append(f"Up to date with {up}.")
+    elif branch:
+        lines.append(f"`{branch}` has no upstream branch set.")
+    if stashes:
+        lines.append(f"There {'is' if stashes == 1 else 'are'} {stashes} stash{'' if stashes == 1 else 'es'}.")
+    return "\n".join(lines)
+
+
+REGISTRY: dict[str, Callable[["Agent"], str]] = {"pr-branch": pr_branch, "rebase-pr": rebase_pr,
+                                                 "check-changes": check_changes}
