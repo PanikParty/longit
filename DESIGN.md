@@ -132,6 +132,16 @@ labelled `workflow NAME - step N`.
 The closing `trajectory:` line counts model calls from the agent loop plus, shown separately, the harness's own tool-less text calls
 (commit message, PR text, branch name, model skill choice), which go through `Agent.harness_backend` so they are counted.
 
+### The rebase-pr workflow
+A second registered workflow answers "when and how to rebase a PR". **When:** only on a non-protected branch (not
+main/master/develop/trunk) with no uncommitted tracked changes, after `git fetch origin`, and only if the base has commits the
+branch lacks (`HEAD..origin/BASE` > 0); the base is the PR's own (`gh pr view --json baseRefName`), else `origin/HEAD`, else
+`origin/main|master`. **How:** `git rebase origin/BASE`; on conflict it runs `git rebase --abort`, names the conflicting files and
+leaves resolution to the user (no model-guessed resolutions); then `git push --force-with-lease origin BRANCH` (or a plain
+`push -u` for a never-pushed branch) and reports the PR URL. The force-push is DESTRUCTIVE, so it asks in every mode, and a
+declined push leaves the rebased branch local with the PR untouched. Plan mode doesn't fetch; it prints the plan from the last
+fetch and says so.
+
 ### Trajectory trace
 With tracing on (`--trace`, `/trace`, `trace = true`) the agent emits one labelled event per step through an optional
 `trace_event(kind, title, body, status)` frontend hook: `model` (latency), `thinking`, `tool_call`, `tool_result`,
