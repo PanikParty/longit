@@ -56,8 +56,11 @@ Classification works on the parsed argv, never on the natural-language request.
 
 Unknown subcommands default to MUTATE. Read-class commands carrying flags that
 can write files or spawn programs (`--output`, `--ext-diff`, `--textconv`, `-O`)
-are promoted to MUTATE. `--yes-reads-only` is the only auto mode; there is no
-"approve everything" flag in v1.
+are promoted to MUTATE. Approval is governed by the **mode** (`manual`
+default, `auto`, `plan`; `/mode`, `--mode`, `mode =` in config): `auto` runs MUTATE commands unattended but DESTRUCTIVE
+ones still ask and BLOCKED ones stay blocked, so there is no "approve everything" setting; `plan` runs only READ
+commands and returns a "not run" result for anything else, which also disables the stuck-loop nudges since a text-only
+reply is the expected output. The system prompt carries a one-line note of the active mode.
 
 Git runs with `GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`, `GIT_EDITOR=true`
 (so a stray `commit` without `-m` cannot hang the loop), and output is capped
@@ -82,7 +85,7 @@ Ctrl-C cancels the current step; Ctrl-D exits.
 backend = "openai"            # or "llamacpp"
 [openai]
 base_url = "http://localhost:11434/v1"
-model = "qwen2.5-coder:7b"
+model = "qwen2.5-coder:14b"
 api_key_env = "OPENAI_API_KEY"
 [llamacpp]
 model_path = "~/models/qwen2.5-7b-instruct-q4_k_m.gguf"
@@ -96,6 +99,36 @@ Native Python in `fs.py`, no subprocess or shell. `ls` and `cd` are confined to 
 which `git`, `gh` and `ls` then use; moving inside the project is automatic, while a `cd` that leaves it
 asks for approval, re-roots the session on the new directory, and clears the session's "always" approvals.
 
+### Commit messages written by the harness
+`git commit` with no message (`-m/-F/-C/--amend/--fixup/...` all count as one) is completed by the harness, not the
+agent loop: `commitmsg.py` collects `git diff --staged` (or `diff HEAD` with `-a`) plus the last few subjects, makes a
+separate tool-less model call in its own context, cleans the reply into a subject (<=72 chars) and optional bullets, and
+inserts `-m` flags. The user then approves the exact command, message included. If nothing is staged the model is not
+called; if the call fails, the error goes back to the agent loop. Plan mode never generates one.
+
+### Skills
+`skills.py`: markdown files with a small frontmatter (`name`, `description`, `triggers`) and an instruction body, loaded
+from `long/builtin_skills/`, `~/.config/long/skills/` and `<root>/.long/skills/` (later overrides earlier by name; bad files
+are skipped with a warning). Per user prompt the agent selects at most one skill: explicit (`/skill`), else the longest
+matching trigger (whole-word phrase or `re:` regex), else, in `model` match mode, a tool-less model call that picks a
+name from the descriptions (unknown replies mean none). Bare approvals ("yes", "go") never re-trigger a skill. The
+chosen body is appended to the system prompt for that turn only. Skills are text, not capabilities: classification,
+mode and approvals are unchanged. Because a repo can contain `.long/skills`, a project skill is treated as untrusted
+input and needs a one-time per-session approval (the model could otherwise be steered, e.g. in auto mode, by a hostile
+repository). Re-rooting with an approved `cd` reloads project skills.
+
+### Trajectory trace
+With tracing on (`--trace`, `/trace`, `trace = true`) the agent emits one labelled event per step through an optional
+`trace_event(kind, title, body, status)` frontend hook: `model` (latency), `thinking`, `tool_call`, `tool_result`,
+`answer`, `harness`, `summary`. Text that accompanies tool calls, `<think>` blocks and the server's `reasoning` field are
+all shown as *thinking*; the final reply is the *answer*. Tool calls print their exact JSON arguments and results print the
+complete string returned to the model (including refusals, denials and "plan mode" skips), replacing the usual 12-line
+preview. Harness-originated actions (text-call recovery, invented-output rejection, stuck-loop nudges, `.gitignore`
+creation, the separate commit-message model call) are labelled `harness` so they can't be mistaken for model actions.
+Reasoning is kept apart from actions and never replayed to the model; it is shown as model-stated, not as proof of
+what ran. (Design note: an analysis of coding-agent trajectories, arXiv 2606.16988, argues stated reasoning is a weak
+account of behaviour while ordered, named actions are the reliable signal; the trace follows that split.)
+
 ### .gitignore guard
 When the model stages everything (`git add -A/--all/.`) in a repo with no `.gitignore`, `long` scans the
 untracked files (`gitignore.py`). If it finds generated or secret files (`.venv/`, `__pycache__/`, `node_modules/`,
@@ -106,7 +139,11 @@ Declining proceeds with the add and is not asked again for that repo this sessio
 A second tool, `gh`, exists solely so "create a GitHub repo and push everything" works. Its allow-list is
 `auth status`, `repo view` (READ) and `repo create` (everything else is BLOCKED). `repo create` needs
 exactly one name and exactly one visibility flag; `--private` is MUTATE (approval), `--public`/`--internal`
-is DESTRUCTIVE (red warning, no session-allow). Only `--private/--public/--internal/--push/--remote/--source/
+is DESTRUCTIVE (red warning, no session-allow). `pr create|view|list|status` are also allowed: the read-only ones refuse `--web` and `-R/--repo`; `pr create` accepts only
+`--title/--body/--base/--head/--fill/--draft` (no `--body-file`, `--template`, `--web`, `--repo`) and is MUTATE. Like commit
+messages, a bare `gh pr create` gets its title and description from a separate tool-less model call over `git log`/`git diff`
+against the base branch (`commitmsg.generate_pr_text`), inserted into the command the user approves; supplied halves are kept.
+Only `--private/--public/--internal/--push/--remote/--source/
 --description/--homepage` are accepted (no `--clone`, `--template`); `--source` must stay inside the repo.
 The model is told to push afterwards with `git push -u origin HEAD` and to check for secrets before `git add -A`.
 

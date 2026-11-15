@@ -240,8 +240,11 @@ def classify_gh(argv: list[str]) -> Verdict:
     if words == ["repo", "view"]:
         return Verdict(Risk.BLOCKED, "gh repo view", "unsupported") if any(a.startswith("--web") or a == "-w" for a in argv) \
             else Verdict(Risk.READ, "gh repo view")
+    if argv[0] == "pr":
+        return _classify_gh_pr(argv)
     if words != ["repo", "create"]:
-        return Verdict(Risk.BLOCKED, " ".join(argv[:2]), "only `auth status`, `repo view` and `repo create` are allowed")
+        return Verdict(Risk.BLOCKED, " ".join(argv[:2]),
+                       "only `auth status`, `repo view`, `repo create` and `pr create|view|list|status` are allowed")
     rest = argv[2:]
     names: list[str] = []
     flags: set[str] = set()
@@ -269,6 +272,35 @@ def classify_gh(argv: list[str]) -> Verdict:
     if vis != {"--private"}:
         return Verdict(Risk.DESTRUCTIVE, "gh repo create", "creates a PUBLICLY visible GitHub repository")
     return Verdict(Risk.MUTATE, "gh repo create", "creates a private repository on GitHub")
+
+
+_GH_PR_VALUE_FLAGS = {"--title", "-t", "--body", "-b", "--base", "-B", "--head", "-H"}
+_GH_PR_BOOL_FLAGS = {"--fill", "--draft", "-d"}
+_GH_PR_READ_BLOCKED = {"--web", "-w", "--repo", "-R"}   # no browser, and no reaching into other repositories
+
+
+def _classify_gh_pr(argv: list[str]) -> Verdict:
+    sub, rest = (argv[1] if len(argv) > 1 else ""), argv[2:]
+    if sub in ("view", "list", "status"):
+        for a in rest:
+            if a.split("=", 1)[0] in _GH_PR_READ_BLOCKED:
+                return Verdict(Risk.BLOCKED, f"gh pr {sub}", f"option {a.split('=', 1)[0]} is not allowed")
+        return Verdict(Risk.READ, f"gh pr {sub}")
+    if sub != "create":
+        return Verdict(Risk.BLOCKED, f"gh pr {sub}".strip(), "only `pr create`, `pr view`, `pr list` and `pr status` are allowed")
+    i = 0
+    while i < len(rest):
+        flag, eq, _ = rest[i].partition("=")
+        if flag in _GH_PR_VALUE_FLAGS:
+            if not eq:
+                i += 1
+                if i >= len(rest):
+                    return Verdict(Risk.BLOCKED, "gh pr create", f"{flag} needs a value")
+        elif not (flag in _GH_PR_BOOL_FLAGS and not eq):
+            what = f"option {flag} is not allowed" if rest[i].startswith("-") else "unexpected argument"
+            return Verdict(Risk.BLOCKED, "gh pr create", what)
+        i += 1
+    return Verdict(Risk.MUTATE, "gh pr create", "opens a pull request on GitHub")
 
 
 def display(argv: list[str], prog: str = "git") -> str:

@@ -1,8 +1,12 @@
 """Backend-neutral types. Messages use the OpenAI chat format throughout."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+
+_THINK = re.compile(r"<think>(.*?)</think>", re.S)
 
 
 class BackendError(RuntimeError):
@@ -20,6 +24,7 @@ class ToolCall:
 class AssistantTurn:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    thinking: str = ""  # model-stated reasoning, if the server exposes it; never sent back to the model
 
     def as_message(self) -> dict[str, Any]:
         msg: dict[str, Any] = {"role": "assistant", "content": self.text or None}
@@ -47,4 +52,9 @@ def parse_choice_message(message: dict[str, Any]) -> AssistantTurn:
             import json
             args = json.dumps(args)
         calls.append(ToolCall(id=tc.get("id") or f"call_{i}", name=fn.get("name", ""), arguments=args))
-    return AssistantTurn(text=(message.get("content") or "").strip(), tool_calls=calls)
+    content = message.get("content") or ""
+    thoughts = [message.get("reasoning_content") or message.get("reasoning") or ""]
+    thoughts += _THINK.findall(content)
+    content = _THINK.sub("", content)
+    return AssistantTurn(text=content.strip(), tool_calls=calls,
+                         thinking="\n\n".join(t.strip() for t in thoughts if t and t.strip()))

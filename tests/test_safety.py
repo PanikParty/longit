@@ -61,3 +61,23 @@ def test_gh_allowlist():
 ])
 def test_gh_blocked(argv):
     assert classify_gh(argv).risk is Risk.BLOCKED
+
+
+def test_gh_pr_classification():
+    assert classify_gh(["pr", "create"]).risk is Risk.MUTATE
+    assert classify_gh(["pr", "create"]).subcommand == "gh pr create"
+    assert classify_gh(["pr", "create", "--title", "T", "--body", "B", "--base", "main", "--draft"]).risk is Risk.MUTATE
+    assert classify_gh(["pr", "create", "--fill", "-B=develop"]).risk is Risk.MUTATE
+    for sub in ("view", "list", "status"):
+        assert classify_gh(["pr", sub]).risk is Risk.READ
+    assert classify_gh(["pr", "view", "12", "--json", "title"]).risk is Risk.READ
+
+
+@pytest.mark.parametrize("argv", [
+    ["pr", "create", "--web"], ["pr", "create", "--body-file", "/etc/passwd"], ["pr", "create", "-F", "x"],
+    ["pr", "create", "--repo", "evil/x"], ["pr", "create", "--title"], ["pr", "create", "stray"],
+    ["pr", "create", "--template", "t.md"], ["pr", "merge", "1"], ["pr", "close", "1"], ["pr", "comment", "1"],
+    ["pr", "checkout", "1"], ["pr"], ["pr", "view", "--web"], ["pr", "list", "-R", "a/b"], ["pr", "status", "--repo=a/b"],
+])
+def test_gh_pr_blocked(argv):
+    assert classify_gh(argv).risk is Risk.BLOCKED

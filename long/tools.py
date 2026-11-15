@@ -33,10 +33,12 @@ GH_TOOL = {
         "name": "gh",
         "description": (
             "Run one GitHub CLI command. Only these are available: [\"auth\", \"status\"], "
-            "[\"repo\", \"view\"], and [\"repo\", \"create\", NAME, \"--private\"|\"--public\", "
-            "\"--source=.\", \"--remote=origin\"] (optional --description TEXT). A visibility flag is required. "
-            "Creating a repo does not push: afterwards use the git tool for `push -u origin HEAD`. "
-            "Arguments exclude the leading 'gh'. The user approves every repo creation."
+            "[\"repo\", \"view\"], [\"pr\", \"view\"|\"list\"|\"status\"], "
+            "[\"repo\", \"create\", NAME, \"--private\"|\"--public\", \"--source=.\", \"--remote=origin\"] "
+            "(a visibility flag is required; it does not push, use the git tool for `push -u origin HEAD`), and "
+            "[\"pr\", \"create\"] to open a pull request for the current, already pushed, branch. Give `pr create` no "
+            "arguments: the harness writes the title and description from the commits and diff "
+            "(optional: --base BRANCH, --draft). Arguments exclude the leading 'gh'. The user approves every creation."
         ),
         "parameters": {
             "type": "object",

@@ -17,6 +17,7 @@ safety layer decides which of them may run unattended.
   LM Studio, vLLM, OpenAI) or an in-process GGUF model through llama.cpp.
 - The model never gets a shell. Its tools are `git`, a tiny `gh` (create repos), and `ls`, `pwd` and `cd` (confined to the project; leaving it needs your approval).
 - Read-only commands run immediately. Anything that changes the repo is shown and needs your approval.
+- `git commit` without a message, and `gh pr create` without a title and description, get them written by the model from the diff and shown to you in the approval prompt.
 - Works in directories that aren't git repositories yet; `git init` is just another approved step.
 
 ## Requirements
@@ -60,6 +61,9 @@ Describe what you want in plain English. Slash commands:
 |---|---|
 | `/help` | show help |
 | `/status` | `git status` of the current repo |
+| `/skills`, `/skill NAME [request]` | list stored skills; run one explicitly |
+| `/trace` | toggle the trajectory trace (`/trace on`, `/trace off`) |
+| `/mode` | show or set the mode: `manual`, `auto` or `plan` (shortcuts `/manual`, `/auto`, `/plan`) |
 | `/model` | list the server's models and pick one (`/model NAME` or `/model N` to switch directly) |
 | `/backend` | show the active backend and model |
 | `/allowed` | subcommands auto-approved this session |
@@ -68,16 +72,77 @@ Describe what you want in plain English. Slash commands:
 
 Ctrl-C cancels the current step.
 
+### Skills
+
+A skill is a stored, named set of instructions for a kind of request. When your prompt matches one, `long`
+adds its instructions to the model's context for that turn and says so (`skill: undo-last-commit (matched trigger ...)`).
+Skills only add guidance: every command still goes through the safety tiers, the current mode and your approvals.
+
+Built in: `github-repo` (publish to a new GitHub repo), `pr-branch` (put every change on a new `pr/...` branch, commit, push it to origin and open the pull request without asking you anything but approvals; try "prepare a pull request"), `undo-last-commit`, `whats-new` (summarize recent changes).
+Add your own as markdown files in `~/.config/long/skills/` (yours everywhere) or `.long/skills/` inside a repo
+(project skills); later layers override earlier ones by name: built-in, then yours, then the project's.
+
+```markdown
+---
+name: tidy-branches
+description: Delete local branches that are already merged
+triggers: [tidy branches, clean up branches, "re:\bprune (old )?branches\b"]
+---
+1. `git branch --merged main` and show the list.
+2. Never touch main, master or the current branch.
+3. Delete the rest with `git branch -d`, one per call.
+```
+
+- **Matching** (`[skills] match` in the config, or `--skill-match`): `triggers` (default) matches the phrases in
+  `triggers:` as whole words, case-insensitively (`re:` prefix for a regex); the longest match wins. `model` also asks
+  the model to pick from the skill descriptions when no trigger matches (one extra model call per request).
+  `off` never auto-matches. `--no-skills` doesn't load any.
+- **Explicit:** `/skills` lists them; `/skill NAME [request]` runs one regardless of matching.
+- **Project skills are untrusted.** They come from files in the repository you opened, so `long` shows what the skill
+  says and asks once per session before using one.
+
+### Trajectory trace
+
+`long --trace` (or `/trace on` in the REPL, or `trace = true` in the config) shows what the model and the harness
+actually did, step by step, with nothing truncated:
+
+```
+-- step 1 - model call                      how long the model took
+-- step 1 - thinking (model-stated)         narration or reasoning the model emitted alongside its calls
+-- step 1 - tool call - git                 the exact call, as JSON
+-- step 1 - result (what the model received) [ok]   the complete output, exactly what went back to the model
+-- step 2 - answer                          the final reply
+-- harness - ...                            things `long` did itself: recovered a call written as text, rejected
+                                            invented output, nudged the model, wrote a commit message
+-- trajectory: 2 model call(s) - tool calls: git x1
+```
+
+"Thinking" is what the model says about its own reasoning (including `<think>` blocks and the `reasoning` field some
+servers return). It is not verified; the tool call and result lines are the ground truth of what ran.
+
 ### Approvals
 
 | Risk | Behaviour | Examples |
 |---|---|---|
 | READ | runs automatically | `status`, `log`, `diff`, `show`, `branch` (list) |
-| MUTATE | shows the command and asks `[y/N/a]`; `a` allows that subcommand for the session | `add`, `commit`, `checkout`, `merge`, `push`, `gh repo create --private` |
+| MUTATE | shows the command and asks `[y/N/a]`; `a` allows that subcommand for the session | `add`, `commit`, `checkout`, `merge`, `push`, `gh repo create --private`, `gh pr create` |
 | DESTRUCTIVE | shows a warning and asks every time | `reset --hard`, `clean -f`, `push --force`, `branch -D`, `gh repo create --public` |
 | BLOCKED | refused, and the model is told why | `-c` config overrides, `--exec`, aliases, `-C` outside the repo |
 
-Unknown subcommands are treated as mutating. There is no "approve everything" mode.
+Unknown subcommands are treated as mutating. Even in `auto` mode, destructive commands still ask
+and blocked ones stay blocked; there is no "approve everything" mode.
+
+### Modes
+
+| Mode | Behaviour |
+|---|---|
+| `manual` (default) | read-only commands run; every change asks first |
+| `auto` | reads and ordinary changes (`add`, `commit`, `push`, private `gh repo create`, a generated `.gitignore`) run without asking; DESTRUCTIVE commands, leaving the project with `cd`, and anything BLOCKED behave as before |
+| `plan` | read-only: the model investigates and replies with a numbered plan; any change it attempts is skipped and nothing is modified |
+
+Switch inside the REPL with `/mode manual|auto|plan` (or `/manual`, `/auto`, `/plan`); `/mode` alone shows the
+current one. Start in a mode with `--mode`, or set `mode = "auto"` in the config. A typical flow is to ask in
+`plan` mode, read the plan, switch to `manual` or `auto`, and say "go".
 
 ## Configuration
 
@@ -86,6 +151,11 @@ Flags override `~/.config/long/config.toml`:
 ```toml
 backend = "openai"            # or "llamacpp"
 max_steps = 12
+mode = "manual"               # manual | auto | plan
+trace = false                 # show the full trajectory
+
+[skills]
+match = "triggers"            # off | triggers | model
 
 [openai]
 base_url = "http://localhost:11434/v1"
@@ -105,6 +175,9 @@ n_gpu_layers = -1
 | `--backend {openai,llamacpp}` | choose the backend |
 | `--base-url URL`, `--model NAME`, `--api-key-env VAR` | OpenAI-compatible backend |
 | `--model-path FILE`, `--n-ctx N` | llama.cpp backend |
+| `--mode {manual,auto,plan}` | approval mode (default `manual`) |
+| `--no-skills`, `--skill-match {off,triggers,model}` | skills (see above) |
+| `--trace` | show the full trajectory (thinking, tool calls, complete results) |
 | `--max-steps N` | cap on model/tool round trips per request |
 
 Small models are less reliable at tool calling. If `long` picks the wrong tool or garbles a call,

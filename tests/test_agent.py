@@ -365,3 +365,63 @@ def test_two_json_text_calls_in_one_reply_run_in_order(repo):
     Agent(be, repo, ui).run_turn("commit")
     assert [x[1] for x in ui.log if x[0] == "confirm"] == ["git add b.txt", "git commit -m 'Add b'"]
     assert git(repo, "log", "--oneline").count("\n") == 2
+
+
+def test_fabricated_tool_output_is_rejected_and_retried(repo):
+    fake = "Staged.\n<tool_response>\nexit code: 0\n(no output)\n</tool_response>\nPushing changes to GitHub."
+    ui = FakeUI()
+    be = FakeBackend([AssistantTurn(text=fake), AssistantTurn(tool_calls=[call("log", "--oneline")]),
+                      AssistantTurn(text="one commit")])
+    Agent(be, repo, ui).run_turn("what is in the log")
+    texts = [x[1] for x in ui.log if x[0] == "text"]
+    assert texts == ["one commit"]                       # the made-up reply never reached the user
+    assert ("auto", "git log --oneline") in ui.log       # and the real command then ran
+    assert "made up" in be.seen[1][-1]["content"]        # the model was told why
+
+
+def test_fabrication_gives_up_after_nudges(repo):
+    fake = AssistantTurn(text="<tool_response>exit code: 0</tool_response>")
+    ui = FakeUI()
+    be = FakeBackend([fake, fake, fake])
+    Agent(be, repo, ui).run_turn("do it")
+    assert not any(x[0] == "text" for x in ui.log)
+    assert any(x[0] == "notice" and "larger model" in x[1] for x in ui.log)
+
+
+def test_permission_asking_is_nudged_into_a_tool_call(repo):
+    ask = "1. Commit the changes.\n\nWould you like to proceed with this?"
+    ui = FakeUI()
+    be = FakeBackend([AssistantTurn(text=ask), AssistantTurn(tool_calls=[call("log", "--oneline")]),
+                      AssistantTurn(text="one commit")])
+    Agent(be, repo, ui).run_turn("commit the changes")
+    assert [x[1] for x in ui.log if x[0] == "text"] == ["one commit"]
+    assert ("auto", "git log --oneline") in ui.log
+    assert "did not call a tool" in be.seen[1][-1]["content"]
+
+
+def test_repeat_loop_across_turns_is_broken(repo):
+    plan = "Sure, let's commit the changes. First I will stage and commit everything."
+    ui = FakeUI()
+    be = FakeBackend([AssistantTurn(text=plan),                                   # turn 1: plan, nothing run
+                      AssistantTurn(text=plan.replace("Sure", "Great")),          # turn 2 ("yes"): same again -> stuck
+                      AssistantTurn(tool_calls=[call("log", "--oneline")]),       # after prune + nudge: acts
+                      AssistantTurn(text="done")])
+    agent = Agent(be, repo, ui)
+    agent.run_turn("commit the changes")
+    agent.run_turn("yes")
+    assert "approving what you just proposed" in be.seen[1][-1]["content"]        # approval hint on the bare "yes"
+    after_nudge = be.seen[2]
+    assert sum(m["role"] == "assistant" for m in after_nudge) == 0                # looped exchanges were pruned
+    assert after_nudge[-1]["content"].startswith("(system) You described a plan")
+    assert ("auto", "git log --oneline") in ui.log
+    assert [x[1] for x in ui.log if x[0] == "text"][-1] == "done"
+
+
+def test_repeat_loop_gives_up_with_notice(repo):
+    plan = "Sure, let's commit the changes first."
+    ui = FakeUI()
+    be = FakeBackend([AssistantTurn(text=plan)] * 6)
+    agent = Agent(be, repo, ui)
+    agent.run_turn("commit")          # first plan is shown (nothing to compare with)
+    agent.run_turn("yes")
+    assert any(x[0] == "notice" and "stuck repeating" in x[1] for x in ui.log)

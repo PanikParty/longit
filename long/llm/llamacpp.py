@@ -26,8 +26,8 @@ class LlamaCppBackend:
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> AssistantTurn:
         try:
-            out = self._llm.create_chat_completion(
-                messages=messages, tools=tools, tool_choice="auto", temperature=self.temperature)
+            extra: dict[str, Any] = {"tools": tools, "tool_choice": "auto"} if tools else {}
+            out = self._llm.create_chat_completion(messages=messages, temperature=self.temperature, **extra)
             return parse_choice_message(out["choices"][0]["message"])
         except Exception as e:  # llama.cpp raises ValueError/RuntimeError for context overflow etc.
             raise BackendError(f"llama.cpp error: {e}") from e

@@ -98,3 +98,15 @@ def test_list_and_set_model():
 def test_list_models_error():
     with pytest.raises(BackendError):
         OpenAICompatBackend("http://127.0.0.1:1/v1", "m").list_models()
+
+
+def test_empty_tools_are_omitted_from_request():
+    seen = {}
+    def fn(path, headers, body):
+        seen.update(body)
+        return 200, {"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
+    srv = serve(fn)
+    b = OpenAICompatBackend(f"http://127.0.0.1:{srv.server_port}/v1", "m")
+    assert b.chat([{"role": "user", "content": "x"}], []).text == "hi"
+    srv.shutdown()
+    assert "tools" not in seen and "tool_choice" not in seen

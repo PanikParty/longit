@@ -4,8 +4,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__, config, tools
-from .agent import Agent
+from . import __version__, config, skills as skillmod, tools
+from .agent import Agent, Mode
 from .llm.base import BackendError
 from .ui import ConsoleUI
 
@@ -37,6 +37,14 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--model-path", help="GGUF file for the llamacpp backend")
     p.add_argument("--n-ctx", type=int)
     p.add_argument("--max-steps", type=int)
+    p.add_argument("--no-skills", action="store_true", help="do not load or match stored skills")
+    p.add_argument("--skill-match", choices=["off", "triggers", "model"],
+                   help="how prompts are matched to skills: trigger phrases (default), the model, or never")
+    p.add_argument("--trace", action="store_true",
+                   help="show the full trajectory: model-stated thinking, each tool call and its complete result")
+    p.add_argument("--mode", choices=[m.value for m in Mode],
+                   help="manual (ask before every change; default), auto (run ordinary changes, ask for "
+                        "destructive ones), plan (read-only; produce a plan)")
     p.add_argument("--version", action="version", version=f"long {__version__}")
     return p.parse_args(argv)
 
@@ -60,6 +68,22 @@ def main(argv: list[str] | None = None) -> int:
         cfg.llamacpp["n_ctx"] = a.n_ctx
     if a.max_steps:
         cfg.max_steps = a.max_steps
+    if a.mode:
+        cfg.mode = a.mode
+    if a.trace:
+        cfg.trace = True
+    if a.skill_match:
+        cfg.skills["match"] = a.skill_match
+    if a.no_skills:
+        cfg.skills["match"] = "off"
+    if cfg.skills.get("match") not in ("off", "triggers", "model"):
+        print(f"long: unknown skills.match '{cfg.skills.get('match')}' (expected off, triggers or model)", file=sys.stderr)
+        return 2
+    try:
+        mode = Mode(cfg.mode)
+    except ValueError:
+        print(f"long: unknown mode '{cfg.mode}' (expected manual, auto or plan)", file=sys.stderr)
+        return 2
 
     resolved = tools.resolve_workdir(a.repo)
     if resolved is None:
@@ -73,9 +97,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     ui = ConsoleUI()
+    ui.trace_enabled = cfg.trace
     if not is_repo:
         ui.notice(f"{root} is not a git repository; ask me to `git init` if you want one.")
-    agent = Agent(backend, root, ui, max_steps=cfg.max_steps)
+    skills = None
+    if not a.no_skills:
+        skills = skillmod.SkillSet(user_dir=(a.config or config.CONFIG_PATH).parent / "skills")
+        skills.set_project(root)
+        for w in skills.warnings:
+            ui.notice(f"skill {w}", error=True)
+    agent = Agent(backend, root, ui, max_steps=cfg.max_steps, mode=mode, skills=skills,
+                  skill_match=cfg.skills["match"])
     if a.request:
         agent.run_turn(" ".join(a.request))
         return 0
