@@ -372,3 +372,27 @@ def test_deletable_triggers(prompt):
 def test_deletable_does_not_hijack_other_requests(prompt, other):
     hit = sk.SkillSet().match(prompt)
     assert (hit[0].name if hit else None) == other, prompt
+
+
+@pytest.mark.parametrize("prompt", [
+    "Are there any branches left to merge?", "any branches left to merge", "what branches still need merging",
+    "is anything left to merge", "branches left to merge?", "Which branches are still waiting to be merged?",
+    "are there any PRs left to merge", "is there any work left to merge"])
+def test_left_to_merge_phrasings_reach_the_scripted_check(prompt):
+    hit = sk.SkillSet().match(prompt)
+    assert hit and hit[0].name == "merged-branches" and hit[0].workflow == "merged-branches", prompt
+
+
+@pytest.mark.parametrize("prompt", ["merge my branch into main", "merge the remaining branches into main",
+                                    "create a branch to merge later", "delete merged branches"])
+def test_merge_commands_are_not_mistaken_for_the_question(prompt):
+    assert sk.SkillSet().match(prompt) is None, prompt
+
+
+def test_left_to_merge_answers_with_the_open_pr_and_never_asks_the_model(tmp_path, monkeypatch):
+    work, _, prs = world(tmp_path)
+    stub_gh(monkeypatch, prs)
+    ui, be = ask(work, "Are there any branches left to merge?")
+    a = answer(ui)
+    assert a.startswith("No: 3 of 5 branch(es) are not merged into origin/main.") and "open PR #4" in a
+    assert be.seen == []
