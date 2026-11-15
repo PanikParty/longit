@@ -349,5 +349,141 @@ def check_changes(a: "Agent") -> str:
     return "\n".join(lines)
 
 
+# ---- the merged-branches workflow ---------------------------------------------------------------------
+_BRANCH_LIST_LIMIT = 15
+_PR_LIST_LIMIT = 100
+_PR_LIST_LIMIT_OLD_GH = 25
+
+
+def _default_base(q: Callable[..., "tools.RunResult"], has_origin: bool) -> tuple[str | None, str | None]:
+    """(base branch name, base ref) for 'merged into what?': origin/HEAD, else origin or local main/master."""
+    if has_origin:
+        head = q("symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD").output.strip()
+        if head.startswith("origin/") and q("rev-parse", "--verify", "-q", head).exit_code == 0:
+            return head.removeprefix("origin/"), head
+        for c in ("main", "master"):
+            if q("rev-parse", "--verify", "-q", f"origin/{c}").exit_code == 0:
+                return c, f"origin/{c}"
+    for c in ("main", "master"):
+        if q("rev-parse", "--verify", "-q", f"refs/heads/{c}").exit_code == 0:
+            return c, c
+    return None, None
+
+
+def merged_branches(a: "Agent") -> str:
+    """Answer "have all the branches been merged?" for every local and origin branch, read-only apart from an
+    optional `git fetch --prune origin` (asks like any change). A branch counts as merged if its tip is in the base
+    branch's history, or if GitHub shows a merged PR from that branch whose head is exactly that tip (which catches
+    squash and rebase merges, where the commits themselves never reach the base)."""
+    label, n = "workflow merged-branches", 0
+    notes: list[str] = []
+
+    def step(argv: list[str], tool: str = "git") -> StepResult:
+        nonlocal n
+        n += 1
+        return a.run_tool(tool, argv, f"{label} - step {n}")
+
+    def q(*argv: str) -> "tools.RunResult":
+        return tools.run_git(list(argv), a.cwd, timeout=30, max_chars=None)
+
+    if not step(["status", "--short", "--branch"]).ok:
+        return "This isn't a git repository, so there are no branches to check."
+    has_origin = step(["remote", "get-url", "origin"]).ok
+    if has_origin:
+        if a.mode.value == "plan":
+            notes.append("plan mode didn't fetch, so remote information is as of the last fetch")
+        else:
+            r = step(["fetch", "--prune", "origin"])
+            if not r.ok:
+                notes.append("you declined the fetch" if r.content.startswith("denied") else
+                             f"the fetch failed ({_first_line(r.output) or r.status})")
+                notes[-1] += ", so remote information may be out of date"
+    base, base_ref = _default_base(q, has_origin)
+    if base is None or base_ref is None:
+        return "I couldn't work out which branch to compare against (no main or master, local or on origin)."
+
+    refs: dict[str, dict[str, str]] = {}
+    for line in q("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/remotes/origin").output.splitlines():
+        ref, _, sha = line.partition(" ")
+        if ref.startswith("refs/heads/"):
+            refs.setdefault(ref.removeprefix("refs/heads/"), {})["local"] = sha
+        elif ref.startswith("refs/remotes/origin/") and ref != "refs/remotes/origin/HEAD":
+            refs.setdefault(ref.removeprefix("refs/remotes/origin/"), {})["origin"] = sha
+    refs.pop(base, None)
+    current = q("branch", "--show-current").output.strip()
+
+    prs: list[tuple[str, str, str, str]] = []   # (number, state, head branch, head commit)
+    gh: StepResult | None = None
+    limited_to = 0
+    if has_origin:
+        # `headRefOid` is missing from older gh releases (e.g. 2.15). There the last of `commits` is the head commit,
+        # but that query hits GitHub's node limit above ~30 PRs, so the fallback reads fewer.
+        for fields, oid, limit in (("number,state,headRefName,headRefOid", ".headRefOid", _PR_LIST_LIMIT),
+                                   ("number,state,headRefName,commits", ".commits[-1].oid", _PR_LIST_LIMIT_OLD_GH)):
+            gh = step(["pr", "list", "--state", "all", "--limit", str(limit), "--json", fields, "--jq",
+                       '.[] | "\\(.number) \\(.state) \\(.headRefName) \\(' + oid + ')"'], tool="gh")
+            if gh.ok or "Unknown JSON field" not in gh.output:
+                limited_to = limit if "commits" in fields else 0
+                break
+    if gh is None or not gh.ok:
+        notes.append("GitHub wasn't checked, so squash- or rebase-merged branches show as not merged"
+                     if has_origin else "there is no origin, so only local branches were compared")
+    else:
+        for ln in gh.output.splitlines():
+            parts = ln.split()
+            if len(parts) == 4:
+                prs.append((parts[0], parts[1], parts[2], parts[3]))
+        if "characters omitted" in gh.output:
+            notes.append("the pull request list was too long to read in full")
+        if limited_to and len(prs) >= limited_to:
+            notes.append(f"this gh version is old, so only the {limited_to} most recent pull requests were checked")
+
+    merged: list[str] = []
+    unmerged: list[tuple[str, str]] = []
+    for name in sorted(refs):
+        where = refs[name]
+        via_pr, ahead_max, tail_pr = "", 0, ""
+        all_merged = True
+        for sha in where.values():
+            if q("merge-base", "--is-ancestor", sha, base_ref).exit_code == 0:
+                continue
+            hit = next((p for p in prs if p[2] == name and p[1] == "MERGED" and p[3] == sha), None)
+            if hit:
+                via_pr = via_pr or f"PR #{hit[0]}"
+                continue
+            all_merged = False
+            cnt = q("rev-list", "--count", f"{base_ref}..{sha}").output.strip()
+            ahead_max = max(ahead_max, int(cnt) if cnt.isdigit() else 0)
+            tail_pr = tail_pr or next((f"PR #{p[0]} was merged but this branch has newer commits"
+                                       for p in prs if p[2] == name and p[1] == "MERGED"), "")
+        if all_merged:
+            merged.append(name + (f" ({via_pr})" if via_pr else "") + (" (current)" if name == current else ""))
+            continue
+        open_pr = next((p[0] for p in prs if p[2] == name and p[1] == "OPEN"), None)
+        place = "local + origin" if len(where) == 2 else ("local only" if "local" in where else "origin only")
+        detail = [place, f"{ahead_max} commit(s) not in {base_ref}",
+                  f"open PR #{open_pr}" if open_pr else (tail_pr or "no PR")]
+        unmerged.append((name + (" (current)" if name == current else ""), ", ".join(detail)))
+
+    def capped(items: list[str]) -> str:
+        shown = ", ".join(items[:_BRANCH_LIST_LIMIT])
+        return shown + (f", ... and {len(items) - _BRANCH_LIST_LIMIT} more" if len(items) > _BRANCH_LIST_LIMIT else "")
+
+    total = len(merged) + len(unmerged)
+    if total == 0:
+        lines = [f"There are no other branches besides `{base}`."]
+    elif not unmerged:
+        lines = [f"Yes: all {total} other branch(es) are merged into {base_ref}.", f"Merged: {capped(merged)}"]
+    else:
+        lines = [f"No: {len(unmerged)} of {total} branch(es) are not merged into {base_ref}.", "Not merged:"]
+        lines += [f"    {name}  ({d})" for name, d in unmerged[:_BRANCH_LIST_LIMIT]]
+        if len(unmerged) > _BRANCH_LIST_LIMIT:
+            lines.append(f"    ... and {len(unmerged) - _BRANCH_LIST_LIMIT} more")
+        if merged:
+            lines.append(f"Merged ({len(merged)}): {capped(merged)}")
+    lines += [f"Note: {nt}." for nt in notes]
+    return "\n".join(lines)
+
+
 REGISTRY: dict[str, Callable[["Agent"], str]] = {"pr-branch": pr_branch, "rebase-pr": rebase_pr,
-                                                 "check-changes": check_changes}
+                                                 "check-changes": check_changes, "merged-branches": merged_branches}

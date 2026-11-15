@@ -148,6 +148,7 @@ Built in:
 |---|---|
 | `pr-branch` | scripted workflow: put every change on a new `pr/...` branch, commit, push to `origin` and open the pull request, asking you only for approvals. Try "prepare a pull request" |
 | `check-changes` | scripted, read-only: answers "is there anything uncommitted/changed here?" with staged, unstaged and untracked files, ahead/behind, stashes and any merge or rebase in progress. Also "is the working tree clean?", "git status" |
+| `merged-branches` | scripted: answers "have all the branches been merged?". Fetches (`git fetch --prune origin`, which asks in manual mode), then checks every local and origin branch against the default branch, counting squash- and rebase-merges through their merged PRs, and lists what isn't merged and why. Read-only apart from the fetch |
 | `rebase-pr` | scripted workflow: bring a PR branch up to date by rebasing it onto its base branch and pushing it (only if it's behind). Try "rebase my PR" or "update my branch" |
 | `github-repo` | publish the current project to a new private GitHub repo and push |
 | `undo-last-commit` | undo the latest commit but keep its changes (offers `revert` if it was already pushed) |
