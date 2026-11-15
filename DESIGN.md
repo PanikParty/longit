@@ -142,6 +142,14 @@ leaves resolution to the user (no model-guessed resolutions); then `git push --f
 declined push leaves the rebased branch local with the PR untouched. Plan mode doesn't fetch; it prints the plan from the last
 fetch and says so.
 
+### The check-changes workflow
+"Is there anything uncommitted/changed here?" is answered without the model: `check-changes` runs `git status --short --branch` and
+`git stash list` (both READ, so no prompts and it works in plan mode), parses `git status --porcelain=v1 -z` into staged / not staged /
+untracked / conflicted (a file can be in two lists), and adds ahead/behind against the upstream and any merge, rebase, cherry-pick,
+revert or bisect in progress. Lists are capped at 8 entries with an "and N more" line. Its triggers are question forms only ("is there
+anything ... uncommitted", "do I have uncommitted changes", "is the working tree clean"), so imperatives such as "commit all uncommitted
+changes" still reach the model.
+
 ### Trajectory trace
 With tracing on (`--trace`, `/trace`, `trace = true`) the agent emits one labelled event per step through an optional
 `trace_event(kind, title, body, status)` frontend hook: `model` (latency), `thinking`, `tool_call`, `tool_result`,
