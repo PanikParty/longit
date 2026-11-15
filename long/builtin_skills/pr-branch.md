@@ -1,6 +1,7 @@
 ---
 name: pr-branch
 action: true
+workflow: pr-branch
 description: Put every change in the working tree on a new PR branch with a commit, push it to origin and open the pull request, with no questions asked
 triggers: [pr branch, pull request branch, prepare a pr, prepare a pull request, send these changes as a pr, push these changes to a new branch, commit everything to a new branch, "re:\b(branch|push)\b.*\bfor (a|the) (pr|pull request)\b"]
 ---

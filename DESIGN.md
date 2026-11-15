@@ -117,6 +117,19 @@ mode and approvals are unchanged. Because a repo can contain `.long/skills`, a p
 input and needs a one-time per-session approval (the model could otherwise be steered, e.g. in auto mode, by a hostile
 repository). Re-rooting with an approved `cd` reloads project skills.
 
+### Scripted skills (workflows)
+`workflow: NAME` in a skill's frontmatter makes the agent skip the model loop and call `workflows.REGISTRY[NAME](agent)`,
+a plain function that runs a fixed command sequence through `Agent.run_tool`. `run_tool` is the same path as a model tool call
+(classify, confine, mode, gitignore guard, commit/PR text generation, approval), so a workflow can do nothing the model could
+not. The model is called only for text, in the same isolated tool-less calls as elsewhere (branch slug, commit message, PR
+text). Failures are handled in code (declined, refused or failed steps stop the run and the report says what was done);
+the final report is written by the harness and appended to the history. `pr-branch` discovers state with read-only commands,
+refuses early (no changes, no `origin`, not a repo), names a free `pr/<slug>` branch, switches to it, stages everything minus
+secret-looking files via `:(exclude,literal)` pathspecs, commits, pushes `-u origin`, and runs `gh pr create`. In plan mode it
+only prints the plan. Workflows are registered in code, never loaded from skill files, so an untrusted project skill can select
+one but not define behaviour. An unknown workflow name falls back to the model with a warning. In the trace, each step is
+labelled `workflow NAME - step N`.
+
 ### Trajectory trace
 With tracing on (`--trace`, `/trace`, `trace = true`) the agent emits one labelled event per step through an optional
 `trace_event(kind, title, body, status)` frontend hook: `model` (latency), `thinking`, `tool_call`, `tool_result`,

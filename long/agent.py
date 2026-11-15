@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import commitmsg, fs, gitignore, safety, tools
+from . import commitmsg, fs, gitignore, safety, tools, workflows
 from . import skills as skillmod
 from .llm.base import AssistantTurn, Backend, BackendError, ToolCall
 from .safety import Risk, Verdict
@@ -47,6 +47,8 @@ _AFFIRM = re.compile(r"^\s*(y|yes|yep|yeah|ok|okay|sure|go|go ahead|proceed|cont
 _ASKS_PERMISSION = re.compile(
     r"(would you like|do you want|shall i|should i|want me)\b[^?]*\b(proceed|continue|go ahead|commit|push|run|stage|apply)\b[^?]*\?"
     r"|\bproceed\?", re.I)
+_BARE_AFFIRM = re.compile(r"^\s*(y|yes|yep|yeah|ok|okay|sure|go|go ahead|proceed|continue|do it|please do|please|"
+                          r"call the tool|run it|confirm(ed)?|approved?)\s*[.!]*\s*$", re.I)
 NUDGE_STUCK = ("(system) You described a plan or asked for permission but did not call a tool. Do not describe, "
                "ask or repeat yourself: the user's request stands, and the harness asks them before anything "
                "changes. Call the appropriate tool now.")
@@ -174,7 +176,7 @@ class Agent:
         try:
             self._run_turn(user_text, skill)
         finally:
-            if self.tracing and self._model_calls:
+            if self.tracing and (self._model_calls or self._tool_calls):
                 tc = ", ".join(f"{n} x{c}" for n, c in sorted(self._tool_calls.items())) or "none"
                 bad = sum(1 for _, o, _, _ in self._log if o in ("denied", "blocked", "planned"))
                 self._trace("summary", f"trajectory: {self._model_calls} model call(s) - tool calls: {tc}"
@@ -185,7 +187,7 @@ class Agent:
         if explicit is not None:
             chosen, how = explicit, "requested"
         elif (self.skills is None or self.skill_match == "off"
-              or (_AFFIRM.match(user_text) and len(user_text.split()) <= 4)):
+              or _BARE_AFFIRM.match(user_text)):
             return None
         elif (hit := self.skills.match(user_text)) is not None:
             chosen, how = hit[0], f"matched trigger '{hit[1]}'"
@@ -222,6 +224,27 @@ class Agent:
             self._skill_trust[key] = self.ui.confirm(f"use project skill '{skill.name}'", verdict) is not Approval.NO
         return self._skill_trust[key]
 
+    def run_tool(self, name: str, argv: list[str], label: str = "") -> workflows.StepResult:
+        """Run one command exactly as if the model had called the tool: same classification, mode, approval and
+        confinement. Used by scripted workflows."""
+        self._tool_calls[name] = self._tool_calls.get(name, 0) + 1
+        args = json.dumps({"args": argv})
+        self._trace("tool_call", f"{label} - tool call - {name}", _pretty_args(args))
+        content = self._execute(ToolCall(id="workflow", name=name, arguments=args))
+        status = _result_status(content)
+        self._trace("tool_result", f"{label} - result", content, status=status)
+        out = content.split("\n", 1)[1].strip() if "\n" in content else ""
+        return workflows.StepResult(content.startswith("exit code: 0"), status or "failed",
+                                    "" if out == "(no output)" else out, content)
+
+    def _run_workflow(self, skill: skillmod.Skill) -> None:
+        self._trace("harness", f"workflow {skill.workflow}: a fixed command sequence run by the harness; "
+                               "the model only writes text")
+        report = workflows.REGISTRY[skill.workflow](self)
+        self.messages.append({"role": "assistant", "content": report})
+        self._trace("answer", "answer (written by the harness)")
+        self.ui.assistant_text(report)
+
     def _run_turn(self, user_text: str, skill: skillmod.Skill | None = None) -> None:
         active = self._select_skill(user_text, skill)
         self._refresh_system(active)
@@ -230,8 +253,14 @@ class Agent:
         self.messages.append({"role": "user", "content": user_text + (APPROVAL_HINT if approving else "")})
         self._log = []
         self._ran_fs = False
-        nudges = stuck = empties = action_nudges = 0
         self._mutated = False
+        if active is not None and active.workflow:
+            if active.workflow in workflows.REGISTRY:
+                self._run_workflow(active)
+                return
+            self.ui.notice(f"skill '{active.name}' names an unknown workflow '{active.workflow}'; "
+                           "falling back to the model", error=True)
+        nudges = stuck = empties = action_nudges = 0
         rejected: list[str] = []  # idle replies already thrown away this turn
         for _ in range(self.max_steps):
             t0 = time.monotonic()

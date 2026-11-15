@@ -239,48 +239,6 @@ def _remote_repo(tmp_path):
     return work, bare
 
 
-def _steps(branch):
-    return [
-        AssistantTurn(tool_calls=[call("status", "--short", "--branch"), call("remote", "-v", id="c2"),
-                                  call("diff", "HEAD", "--stat", id="c3")]),
-        AssistantTurn(tool_calls=[call("branch", "--list", branch)]),
-        AssistantTurn(tool_calls=[call("switch", "-c", branch)]),
-        AssistantTurn(tool_calls=[call("add", "-A", "--", ".", ":(exclude).env")]),
-        AssistantTurn(tool_calls=[call("commit")]),
-        AssistantTurn(text="Add new_module and update a.txt"),                 # the harness's commit-message call
-        AssistantTurn(tool_calls=[call("push", "-u", "origin", branch)]),
-        AssistantTurn(text="Pushed pr/add-new-module to origin."),
-    ]
-
-
-def test_pr_branch_flow_end_to_end_manual_mode(tmp_path):
-    work, bare = _remote_repo(tmp_path)
-    ui = FakeUI(answers=[Approval.YES] * 4)              # switch, add, commit, push: only permissions
-    be = FakeBackend(_steps("pr/add-new-module"))
-    Agent(be, work, ui, skills=sk.SkillSet()).run_turn("prepare a pull request from my changes")
-    assert [x[1] for x in ui.log if x[0] == "confirm"] == [
-        "git switch -c pr/add-new-module", "git add -A -- . ':(exclude).env'",
-        "git commit -m 'Add new_module and update a.txt'", "git push -u origin pr/add-new-module"]
-    assert git(work, "branch", "--show-current").strip() == "pr/add-new-module"
-    assert git(work, "log", "-1", "--format=%s").strip() == "Add new_module and update a.txt"
-    committed = sorted(git(work, "show", "--name-only", "--format=", "HEAD").split())
-    assert committed == [".gitignore", "a.txt", "new_module.py"] and ".env" not in committed        # secret left out
-    assert "pr/add-new-module" in git(bare, "branch", "--list")                                                  # reached origin
-    assert git(work, "rev-parse", "main").strip() == git(bare, "rev-parse", "main").strip()                      # main untouched
-    assert "Active skill: pr-branch" in be.seen[0][0]["content"]
-    assert not any(x[0] == "text" and x[1].rstrip().endswith("?") for x in ui.log)
-
-
-def test_pr_branch_flow_runs_unattended_in_auto_mode(tmp_path):
-    from long.agent import Mode
-    work, bare = _remote_repo(tmp_path)
-    ui = FakeUI()
-    be = FakeBackend(_steps("pr/add-new-module"))
-    Agent(be, work, ui, mode=Mode.AUTO, skills=sk.SkillSet()).run_turn("prepare a pull request")
-    assert not any(x[0] == "confirm" for x in ui.log)
-    assert "pr/add-new-module" in git(bare, "branch", "--list")
-
-
 # ---- gh pr create: harness-written title and description ----------------------------------
 import json as _json
 
@@ -372,23 +330,6 @@ def test_pr_text_backend_failure_reported(tmp_path, monkeypatch):
     Agent(be, work, ui).run_turn("open the pr")
     assert ran == [] and not any(x[0] == "confirm" for x in ui.log)
     assert any(x[0] == "notice" and "could not write the pull request text" in x[1] for x in ui.log)
-
-
-def test_pr_branch_skill_opens_the_pr(tmp_path, monkeypatch):
-    work, bare = _remote_repo(tmp_path)
-    ran = stub_gh(monkeypatch)
-    steps = _steps("pr/add-new-module")[:-1] + [
-        AssistantTurn(tool_calls=[gh_call("pr", "create")]),
-        AssistantTurn(text="Add new_module and update a.txt\n\nAdds a module and updates a.txt."),   # harness's PR-text call
-        AssistantTurn(text="Pushed pr/add-new-module and opened https://github.com/me/long/pull/7.")]
-    ui = FakeUI(answers=[Approval.YES] * 5)               # switch, add, commit, push, pr create
-    be = FakeBackend(steps)
-    Agent(be, work, ui, skills=sk.SkillSet()).run_turn("prepare a pull request from my changes")
-    confirms = [x[1] for x in ui.log if x[0] == "confirm"]
-    assert len(confirms) == 5 and confirms[-1].startswith("gh pr create --title 'Add new_module and update a.txt'")
-    assert ran and ran[0][:2] == ["pr", "create"]
-    assert "gh pr create" in be.seen[0][0]["content"]       # the skill tells the model to open it
-    assert "pr/add-new-module" in git(bare, "branch", "--list")
 
 
 def test_empty_reply_mid_skill_is_nudged_to_continue(repo, tmp_path):

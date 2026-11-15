@@ -161,3 +161,28 @@ def insert_pr_text(argv: list[str], title: str, body: str) -> list[str]:
     given = _pr_args(argv)
     extra = (["--title", title] if "title" not in given else []) + (["--body", body or title] if "body" not in given else [])
     return argv[:2] + extra + argv[2:]
+
+
+# ---- branch names ----------------------------------------------------------------------------------
+BRANCH_SYSTEM = """You name git branches. Reply with ONLY a branch slug: 2 to 5 lowercase words joined by hyphens, using
+only a-z, 0-9 and hyphens, at most 40 characters, describing the main purpose of these changes. No prefix, no quotes."""
+
+
+def slugify(text: str, limit: int = 40) -> str:
+    t = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    t = re.sub(r"^pr-", "", t)
+    if len(t) > limit:
+        t = t[:limit].rsplit("-", 1)[0] or t[:limit]
+    return t.strip("-")
+
+
+def generate_branch_slug(backend: Backend, cwd: Path, paths: list[str]) -> str | None:
+    """A short slug for a branch holding `paths`, or None if the model gave nothing usable.
+    Raises BackendError if the backend fails."""
+    stat = tools.run_git(["diff", "HEAD", "--stat", "--no-color", "--no-ext-diff"], cwd, timeout=20)
+    listing = "\n".join(paths[:60]) + (f"\n... and {len(paths) - 60} more" if len(paths) > 60 else "")
+    user = f"Changed files:\n{listing}\n\nSummary of changes to tracked files:\n{stat.output.strip() or '(none)'}"
+    messages: list[dict[str, Any]] = [{"role": "system", "content": BRANCH_SYSTEM}, {"role": "user", "content": user}]
+    text = backend.chat(messages, []).text.strip()
+    slug = slugify(text.splitlines()[0].replace("`", "")) if text else ""
+    return slug if len(slug) >= 3 else None
