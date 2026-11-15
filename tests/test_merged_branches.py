@@ -205,7 +205,7 @@ def test_only_read_commands_besides_the_fetch(tmp_path, monkeypatch):
                         (seen.append(argv[0]), real(argv, cwd, timeout, max_chars))[1])
     ask(work)
     assert set(seen) <= {"status", "remote", "fetch", "for-each-ref", "merge-base", "rev-list", "rev-parse",
-                         "symbolic-ref", "branch", "log"}, seen
+                         "symbolic-ref", "branch", "log", "worktree"}, seen
     assert ran and all(c[:2] == ["pr", "list"] for c in ran)                # gh is only asked to list PRs
 
 
@@ -261,3 +261,114 @@ def test_other_gh_errors_are_not_retried(tmp_path, monkeypatch):
     monkeypatch.setattr(tools, "run_gh", broken)
     a = answer(ask(work)[0])
     assert len(ran) == 1 and "GitHub wasn't checked" in a
+
+
+# ---- deletable-branches --------------------------------------------------------------------------
+def branches(work):
+    return sorted(b.strip().lstrip("* ") for b in git(work, "branch", "--format=%(refname:short)").split())
+
+
+def test_deletable_lists_only_safe_branches_and_deletes_nothing(tmp_path, monkeypatch):
+    work, bare, prs = world(tmp_path)
+    stub_gh(monkeypatch, prs)
+    before = branches(work)
+    a = answer(ask(work, "Give me a list of all the branches that I can delete")[0])
+    assert a.startswith("You can delete 2 branch(es); each is merged into origin/main:")
+    assert "    merged-a  [local + origin]" in a
+    assert "    squashed (PR #2)  [local + origin]  needs -D: squash/rebase-merged" in a
+    assert "    git branch -d merged-a\n" in a and "    git branch -D squashed\n" in a
+    assert "    git push origin --delete merged-a squashed\n" in a
+    assert "stale  (not merged: local + origin, 2 commit(s) not in origin/main, PR #3 was merged but this branch has newer commits)" in a
+    assert "open-b  (open PR #4)" in a and "local-only  (not merged: local only, 1 commit(s) not in origin/main, no PR)" in a
+    assert "To delete them (nothing was deleted):" in a and a.rstrip().endswith("Compared with origin/main.")
+    assert branches(work) == before and "merged-a" in git(bare, "branch", "--list")        # nothing was touched
+
+
+def test_never_offers_the_current_branch_base_or_long_lived_branches(tmp_path, monkeypatch):
+    work, _, prs = world(tmp_path)
+    stub_gh(monkeypatch, prs)
+    for name in ("develop", "release/1.0"):
+        git(work, "branch", name, "main")                                            # merged (same tip as main)
+    git(work, "switch", "-q", "merged-a")
+    a = answer(ask(work, "which branches can I delete")[0])
+    safe_part = a.split("Keep (")[0]
+    assert "merged-a" not in safe_part.split("To delete")[0] and "develop" not in safe_part and "release/1.0" not in safe_part
+    assert "Can't delete: develop (long-lived branch); merged-a (checked out here); release/1.0 (long-lived branch)." in a
+    assert " main " not in safe_part and "main (" not in a                              # the base is never even considered
+
+
+def test_branch_checked_out_in_another_worktree_is_not_offered(tmp_path, monkeypatch):
+    work, _, prs = world(tmp_path)
+    stub_gh(monkeypatch, prs)
+    git(work, "worktree", "add", "-q", str(tmp_path / "wt"), "merged-a")
+    a = answer(ask(work, "which branches can I delete")[0])
+    assert "merged-a (checked out in another worktree)" in a and "git branch -d merged-a" not in a
+    assert "squashed" in a.split("Keep (")[0]                                           # the others are still offered
+
+
+def test_origin_only_merged_branch_gets_only_a_remote_delete(tmp_path, monkeypatch):
+    work, bare, prs = world(tmp_path)
+    git(work, "branch", "gone", "main")
+    git(work, "push", "-q", "origin", "gone")
+    git(work, "branch", "-D", "gone")
+    stub_gh(monkeypatch, prs)
+    a = answer(ask(work, "which branches can I delete")[0])
+    assert "    gone  [origin only]" in a and "git push origin --delete gone merged-a squashed" in a
+    assert "git branch -d merged-a\n" in a and "git branch -d merged-a gone" not in a
+
+
+def test_nothing_safe_to_delete(tmp_path, monkeypatch):
+    work, _, prs = world(tmp_path)
+    for b in ("merged-a", "squashed"):
+        git(work, "branch", "-q", "-D", b)
+        subprocess.run(["git", "push", "-q", "origin", "--delete", b], cwd=work, capture_output=True)
+    stub_gh(monkeypatch, prs)
+    a = answer(ask(work, "which branches can I delete")[0])
+    assert a.startswith("Nothing is safe to delete right now.") and "Keep (3):" in a and "To delete them" not in a
+
+
+def test_without_github_squash_merged_branches_are_kept_and_a_note_says_why(tmp_path, monkeypatch):
+    work, _, _ = world(tmp_path)
+    stub_gh(monkeypatch, fail=True)
+    a = answer(ask(work, "which branches can I delete")[0])
+    assert a.startswith("You can delete 1 branch(es)") and "git branch -D" not in a
+    assert "squashed  (not merged:" in a and "Note: GitHub wasn't checked" in a
+
+
+def test_deletable_asks_only_for_the_fetch_in_manual_mode(tmp_path, monkeypatch):
+    work, _, prs = world(tmp_path)
+    stub_gh(monkeypatch, prs)
+    ui, _ = ask(work, "which branches can I delete", mode=Mode.MANUAL, answers=[Approval.YES])
+    assert [x[1] for x in ui.log if x[0] == "confirm"] == ["git fetch --prune origin"]
+    ui, _ = ask(work, "which branches can I delete", mode=Mode.PLAN)
+    assert not any(x[0] == "confirm" for x in ui.log) and "plan mode didn't fetch" in answer(ui)
+
+
+def test_repo_without_origin(repo):
+    git(repo, "switch", "-q", "-c", "done")
+    commit(repo, "d.txt")
+    git(repo, "switch", "-q", "-")
+    git(repo, "merge", "-q", "--no-ff", "-m", "m", "done")
+    git(repo, "switch", "-q", "-c", "wip")
+    commit(repo, "w.txt")
+    a = answer(ask(repo, "which branches can I delete")[0])
+    assert "    done  [local only]" in a and "git branch -d done" in a and "git push origin --delete" not in a
+    assert "wip  (checked out here)" in a or "wip (checked out here)" in a
+
+
+@pytest.mark.parametrize("prompt", [
+    "Give me a list of all the branches that I can delete", "which branches can I delete", "what branches are safe to delete?",
+    "list the branches I can safely delete", "show me branches to delete", "is it safe to delete these branches",
+    "any stale branches?", "which branches should I remove", "what are the branches that can be deleted"])
+def test_deletable_triggers(prompt):
+    hit = sk.SkillSet().match(prompt)
+    assert hit and hit[0].name == "deletable-branches" and hit[0].workflow == "deletable-branches", prompt
+
+
+@pytest.mark.parametrize("prompt,other", [
+    ("delete the branch foo", None), ("delete merged branches", None), ("create a branch to delete the file", None),
+    ("what branches exist", None), ("have all the branches been merged", "merged-branches"),
+    ("which branches have been merged", "merged-branches"), ("rebase my PR", "rebase-pr")])
+def test_deletable_does_not_hijack_other_requests(prompt, other):
+    hit = sk.SkillSet().match(prompt)
+    assert (hit[0].name if hit else None) == other, prompt
